@@ -19,10 +19,17 @@ sys.path.insert(0, str(ROOT))
 
 from build_corpus import DOMAINS, load_tokens  # noqa: E402
 from sunnynet.baseline import BaselineConfig, TransformerLM, solve_baseline_for_params  # noqa: E402
+from sunnynet.linear_baselines import (BLOCKS, LINEAR_ARCHS, _LMBase,  # noqa: E402
+                                       build_linear_baseline)
 from sunnynet.model import SunnyConfig, SunnyNet  # noqa: E402
 from sunnynet.profiling import CacheCounter, PerfTracker, peak_rss_mb  # noqa: E402
 
 DEFAULT_MIX = {"zh_ancient": 0.40, "en_literature": 0.35, "code_python": 0.25}
+
+ARCH_CHOICES = ["sunnynet", "transformer", *LINEAR_ARCHS]
+DEFAULT_LR = {"sunnynet": 3e-3, "transformer": 6e-3,
+              "linear_attn": 3e-3, "rwkv": 3e-3, "mamba": 3e-3,
+              "hyena": 3e-3, "h3": 3e-3}
 
 
 class DomainMixer:
@@ -93,12 +100,20 @@ def build_models(arch: str, vocab: int, preset: str, ablation: dict | None,
         return sunny, None, sunny_cfg
 
     target = sunny.num_params(non_embedding=True)
-    bcfg, bn, rel = solve_baseline_for_params(target, vocab, n_layers=6, n_heads=8,
-                                              max_len=max(seq_len, 2048))
-    base = TransformerLM(bcfg)
-    print(f"[baseline] 以 SunnyNet 计算栈参数 {target:,} 为目标, "
-          f"选中 d_model={bcfg.d_model} d_ff={bcfg.d_ff} "
-          f"-> 计算栈参数 {bn:,} (偏差 {rel*100:.2f}%)")
+    if arch == "transformer":
+        bcfg, bn, rel = solve_baseline_for_params(target, vocab, n_layers=6, n_heads=8,
+                                                  max_len=max(seq_len, 2048))
+        base = TransformerLM(bcfg)
+    else:
+        nl = 6 if preset == "proto20m" else 4
+        bcfg, bn, rel = build_linear_baseline(arch, target, vocab,
+                                              max_len=max(seq_len, 2048), n_layers=nl)
+        base = _LMBase(bcfg)
+        for _ in range(bcfg.n_layers):
+            base.blocks.append(BLOCKS[arch](bcfg))
+        base._finish_init()
+    print(f"[baseline:{arch}] 以 SunnyNet 计算栈参数 {target:,} 为目标, "
+          f"选中 d_model={bcfg.d_model} -> 计算栈参数 {bn:,} (偏差 {rel*100:.2f}%)")
     return sunny, base, bcfg
 
 
@@ -125,7 +140,7 @@ def evaluate(model, batches, device="cpu") -> float:
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--arch", choices=["sunnynet", "transformer"], default="sunnynet")
+    ap.add_argument("--arch", choices=ARCH_CHOICES, default="sunnynet")
     ap.add_argument("--preset", choices=["small", "proto20m"], default="small")
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--batch-size", type=int, default=8)

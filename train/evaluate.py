@@ -29,6 +29,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from build_corpus import DOMAINS, load_tokens  # noqa: E402
+from sunnynet.linear_baselines import LINEAR_ARCHS  # noqa: E402
 from sunnynet.model import SunnyConfig, SunnyNet  # noqa: E402
 from sunnynet.profiling import CacheCounter, PerfTracker  # noqa: E402
 
@@ -132,6 +133,12 @@ def load_model(ckpt: str, device="cpu"):
         from sunnynet.baseline import BaselineConfig, TransformerLM
         cfg = BaselineConfig(**d["config"])
         m = TransformerLM(cfg)
+    elif arch in LINEAR_ARCHS:
+        from sunnynet.linear_baselines import BLOCKS, LinearConfig, _LMBase
+        cfg = LinearConfig(**d["config"])
+        m = _LMBase(cfg)
+        for _ in range(cfg.n_layers):
+            m.blocks.append(BLOCKS[arch](cfg))
     else:
         cfg = SunnyConfig(**d["config"])
         m = SunnyNet(cfg)

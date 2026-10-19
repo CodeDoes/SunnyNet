@@ -12,6 +12,7 @@ __all__ = [
     "CenteredScaleNorm",
     "multiscale_decay",
     "logspace_scan",
+    "gated_scan",
 ]
 
 
@@ -54,32 +55,41 @@ def multiscale_decay(n: int, h_min: float = 2.0, h_max: float = 8192.0,
     return 1.0 / h
 
 
-def logspace_scan(nu: torch.Tensor, p: torch.Tensor, s0: torch.Tensor,
-                  chunk: int = 64, p_min_hint: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
-    """一阶线性递推 s_t = p_t*s_{t-1} + (1-p_t)*nu_t 的闭式解.
+def gated_scan(p: torch.Tensor, g: torch.Tensor, s0: torch.Tensor,
+               chunk: int = 64, p_min_hint: float | None = None):
+    """一阶线性递推 s_t = p_t*s_{t-1} + g_t 的闭式解, 支持任意尾随状态维.
 
-    记 P_j = sum_{k<=j} ln p_k (inclusive), g_k = (1-p_k)*nu_k:
+    记 P_j = sum_{k<=j} ln p_k (inclusive):
         s_j = exp(P_j) * ( s_in + sum_{k<=j} g_k * exp(-P_k) )
-    两次 inclusive cumsum 得到整块状态, 块间串行 T/chunk 次.
+    两次 inclusive cumsum 得到整块状态, 块间串行 ceil(T/chunk) 次.
 
-    p_min_hint 给定时直接用其限制块长, 跳过 p.amin() 的同步开销; 取值不变.
-    nu, p: (B,T,N);  s0: (B,N) -> (states (B,T,N), s_T (B,N))
+    p, g: (..., T, N);  s0: (..., N) -> (states (..., T, N), s_T (..., N))
     """
-    B, T, N = nu.shape
+    p, g = torch.broadcast_tensors(p, g)
+    T = p.shape[-2]
     lp = torch.log(p)
-    g = (1.0 - p) * nu
     p_min = p.detach().amin().item() if p_min_hint is None else p_min_hint
     chunk = _safe_chunk(p_min, chunk)
     s = s0
     outs = []
     for start in range(0, T, chunk):
         end = min(start + chunk, T)
-        P = torch.cumsum(lp[:, start:end], dim=1)
-        A = torch.cumsum(g[:, start:end] * torch.exp(-P), dim=1)
-        s_c = torch.exp(P) * (s.unsqueeze(1) + A)
+        P = torch.cumsum(lp[..., start:end, :], dim=-2)
+        A = torch.cumsum(g[..., start:end, :] * torch.exp(-P), dim=-2)
+        s_c = torch.exp(P) * (s.unsqueeze(-2) + A)
         outs.append(s_c)
-        s = s_c[:, -1]
-    return torch.cat(outs, dim=1), s
+        s = s_c[..., -1, :]
+    return torch.cat(outs, dim=-2), s
+
+
+def logspace_scan(nu: torch.Tensor, p: torch.Tensor, s0: torch.Tensor,
+                  chunk: int = 64, p_min_hint: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+    """一阶线性递推 s_t = p_t*s_{t-1} + (1-p_t)*nu_t, 即 gated_scan 取 g=(1-p)*nu.
+
+    p_min_hint 给定时直接用其限制块长, 跳过 p.amin() 的同步开销; 取值不变.
+    nu, p: (B,T,N);  s0: (B,N) -> (states (B,T,N), s_T (B,N))
+    """
+    return gated_scan(p, (1.0 - p) * nu, s0, chunk=chunk, p_min_hint=p_min_hint)
 
 
 def _safe_chunk(p_min: float, requested: int, headroom_bits: int = 64) -> int:
