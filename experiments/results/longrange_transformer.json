@@ -1,0 +1,237 @@
+{
+  "ckpt": "data/ck_probe_transformer.pt",
+  "params": 1017312,
+  "params_non_embed": 361952,
+  "config": {
+    "vocab_size": 8192,
+    "d_model": 64,
+    "n_heads": 8,
+    "n_layers": 6,
+    "d_ff": 336,
+    "max_len": 2048,
+    "tie_embeddings": true
+  },
+  "domain_ppl": {
+    "zh_ancient": {
+      "ppl": 396.7187,
+      "nll": 5.983227,
+      "tokens": 16384
+    },
+    "en_literature": {
+      "ppl": 35.6491,
+      "nll": 3.573723,
+      "tokens": 16384
+    },
+    "code_python": {
+      "ppl": 27.4203,
+      "nll": 3.311285,
+      "tokens": 16384
+    }
+  },
+  "long_range": {
+    "ngram1": {
+      "zh_ancient": {
+        "near": {
+          "hit": 1,
+          "total": 1325,
+          "acc": 0.0008
+        },
+        "mid": {
+          "hit": 7,
+          "total": 3314,
+          "acc": 0.0021
+        },
+        "far": {
+          "hit": 3,
+          "total": 588,
+          "acc": 0.0051
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      },
+      "en_literature": {
+        "near": {
+          "hit": 18,
+          "total": 2756,
+          "acc": 0.0065
+        },
+        "mid": {
+          "hit": 26,
+          "total": 3391,
+          "acc": 0.0077
+        },
+        "far": {
+          "hit": 0,
+          "total": 571,
+          "acc": 0.0
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      },
+      "code_python": {
+        "near": {
+          "hit": 645,
+          "total": 3580,
+          "acc": 0.1802
+        },
+        "mid": {
+          "hit": 386,
+          "total": 3259,
+          "acc": 0.1184
+        },
+        "far": {
+          "hit": 4,
+          "total": 311,
+          "acc": 0.0129
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      }
+    },
+    "ngram4": {
+      "zh_ancient": {
+        "near": {
+          "hit": 0,
+          "total": 6,
+          "acc": 0.0
+        },
+        "mid": {
+          "hit": 0,
+          "total": 235,
+          "acc": 0.0
+        },
+        "far": {
+          "hit": 0,
+          "total": 38,
+          "acc": 0.0
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      },
+      "en_literature": {
+        "near": {
+          "hit": 0,
+          "total": 26,
+          "acc": 0.0
+        },
+        "mid": {
+          "hit": 1,
+          "total": 589,
+          "acc": 0.0017
+        },
+        "far": {
+          "hit": 1,
+          "total": 331,
+          "acc": 0.003
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      },
+      "code_python": {
+        "near": {
+          "hit": 220,
+          "total": 558,
+          "acc": 0.3943
+        },
+        "mid": {
+          "hit": 266,
+          "total": 2327,
+          "acc": 0.1143
+        },
+        "far": {
+          "hit": 54,
+          "total": 447,
+          "acc": 0.1208
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      }
+    },
+    "ngram8": {
+      "zh_ancient": {
+        "near": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        },
+        "mid": {
+          "hit": 0,
+          "total": 46,
+          "acc": 0.0
+        },
+        "far": {
+          "hit": 0,
+          "total": 4,
+          "acc": 0.0
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      },
+      "en_literature": {
+        "near": {
+          "hit": 0,
+          "total": 4,
+          "acc": 0.0
+        },
+        "mid": {
+          "hit": 0,
+          "total": 111,
+          "acc": 0.0
+        },
+        "far": {
+          "hit": 1,
+          "total": 66,
+          "acc": 0.0152
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      },
+      "code_python": {
+        "near": {
+          "hit": 38,
+          "total": 83,
+          "acc": 0.4578
+        },
+        "mid": {
+          "hit": 113,
+          "total": 1034,
+          "acc": 0.1093
+        },
+        "far": {
+          "hit": 43,
+          "total": 328,
+          "acc": 0.1311
+        },
+        "ultra": {
+          "hit": 0,
+          "total": 0,
+          "acc": null
+        }
+      }
+    }
+  }
+}

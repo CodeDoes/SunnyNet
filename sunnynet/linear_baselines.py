@@ -97,13 +97,18 @@ class _FFN(nn.Module):
 
 
 class LinearAttentionBlock(nn.Module):
-    """线性注意力: phi(x)=(elu(x)+1), 因果累积 K^T V, 无 softmax, O(N)."""
+    """线性注意力: phi(x)=(elu(x)+1), 因果累积 K^T V, 无 softmax, O(N).
+
+    分块形式: 块内因果注意力 O(C^2), 块间用累积 KV 状态 O(d^2), 不物化
+    (B,T,H,d,d) 中间张量 —— 否则常数因子会被人为放大.
+    """
 
     def __init__(self, cfg: LinearConfig):
         super().__init__()
         d = cfg.d_model
         self.n_heads = max(1, d // 32)
         self.d_head = d // self.n_heads
+        self.chunk = 64
         self.qkv = nn.Linear(d, 3 * d, bias=True)
         self.proj = nn.Linear(d, d, bias=True)
         self.ln1 = nn.LayerNorm(d)
@@ -119,12 +124,36 @@ class LinearAttentionBlock(nn.Module):
         q = q.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         k = k.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
         v = v.view(B, T, self.n_heads, self.d_head).transpose(1, 2)
-        kv = torch.einsum("bhtd,bhte->bhtde", k, v)
-        kv_cum = torch.cumsum(kv, dim=1)
-        z = torch.cumsum(k, dim=1)
-        num = torch.einsum("bhtd,bhtde->bhte", q, kv_cum)
-        den = torch.einsum("bhtd,bhtd->bht", q, z).unsqueeze(-1) + 1e-6
-        y = (num / den).transpose(1, 2).contiguous().view(B, T, C)
+
+        ch = self.chunk
+        pad = (-T) % ch
+        if pad:
+            q = F.pad(q, (0, 0, 0, pad))
+            k = F.pad(k, (0, 0, 0, pad))
+            v = F.pad(v, (0, 0, 0, pad))
+        Tp = T + pad
+        q = q.view(B, self.n_heads, Tp // ch, ch, self.d_head)
+        k = k.view(B, self.n_heads, Tp // ch, ch, self.d_head)
+        v = v.view(B, self.n_heads, Tp // ch, ch, self.d_head)
+
+        kv_state = q.new_zeros(B, self.n_heads, self.d_head, self.d_head)
+        k_state = q.new_zeros(B, self.n_heads, self.d_head)
+        outs = []
+        tril = torch.tril(torch.ones(ch, ch, device=q.device, dtype=q.dtype))
+        for c in range(Tp // ch):
+            qc, kc, vc = q[:, :, c], k[:, :, c], v[:, :, c]
+            att = (qc @ kc.transpose(-1, -2)) * tril
+            y_intra = att @ vc
+            y_inter = torch.einsum("bhcd,bhde->bhce", qc, kv_state)
+            z_intra = (qc @ kc.transpose(-1, -2) * tril).sum(-1, keepdim=True)
+            z_inter = torch.einsum("bhcd,bhd->bhc", qc, k_state).unsqueeze(-1)
+            num = y_intra + y_inter
+            den = z_intra + z_inter + 1e-6
+            outs.append(num / den)
+            kv_state = kv_state + torch.einsum("bhcd,bhce->bhde", kc, vc)
+            k_state = k_state + kc.sum(dim=-2)
+        y = torch.cat(outs, dim=2).reshape(B, self.n_heads, Tp, self.d_head)
+        y = y[:, :, :T].transpose(1, 2).contiguous().view(B, T, C)
         x = x + self.proj(y)
         return x + self.ff(self.ln2(x))
 

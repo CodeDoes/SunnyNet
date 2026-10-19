@@ -134,12 +134,13 @@ Xavier / Glorot / He / MSRA 初始化、LSTM / GRU 门控公式、SSM / HiPPO �
 架构价值由实测数据说明，不接受宣称。全部实验共用同一 token 流、同一配置、同一 token 预算与线程数。
 
 - **基线对照**：同计算栈参数量的标准 Transformer（用解析公式求解 `d_model`/`d_ff` 匹配参数量），比较每 token 训练耗时、验证困惑度、峰值内存。
+- **同复杂度对比（核心）**：与同样 O(N) 的公开架构横向对比——**线性注意力 / RWKV / Mamba / Hyena / H3**。参数量用 meta device 实例化对齐（手推公式漏项严重），层数偏离不超 ±1，同语料同协议。手写实现，不调用第三方库。
 - **消融实验**：逐个关闭 保护门 / 循环滤波 / 局部卷积 / 非线性支路，观察 loss 与速度变化。
 - **种子稳定性**：多随机种子重复，检验可复现性。
 - **缩放趋势**：small（1.4M）→ 20M 原型。
 - **长序列验证（核心）**：固定模型、改变序列长度，实测前向耗时，验证 O(N) 优势与交叉点。
 - **长序列训练对照**：T=1024 真实训练下，SunnyNet 快 **2.08×**、ppl 优 **21.2%**、内存省 **36.8%**。
-- **长距离探针**：在真实验证语料上统计"重复上下文 top-1 命中率"，按距离分桶（near/mid/far/ultra），**量化滚动状态的长程保真度**——这是本架构最主要的能力风险，必须测。
+- **长距离探针**：在真实验证语料上统计"重复上下文 top-1 命中率"，按距离分桶（near/mid/far/ultra）+ 多键长（1/4/8 token）。代码域远距命中 **0.13**（未训练模型为 0.0，探针有判别力）；自然语言域接近 0。
 
 实测结果见 [docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md)。
 
@@ -154,8 +155,9 @@ Xavier / Glorot / He / MSRA 初始化、LSTM / GRU 门控公式、SSM / HiPPO �
 ```
 sunnynet/
   ops.py          原创算子: poly_sigmoid / softwedge / CenteredScaleNorm /
-                  多尺度衰减 / 对数域并行扫描
+                  多尺度衰减 / 对数域并行扫描 / 通用门控扫描
   layers.py       SunnyBlock: 状态更新单元 + 循环滤波 + 局部卷积 + 非线性支路
+  linear_baselines.py  O(N) 同复杂度对照: 线性注意力 / RWKV / Mamba / Hyena / H3
   model.py        SunnyNet 主体 (状态 (B,L,D), 逐层接力)
   init.py         谱锚定初始化
   baseline.py     同参数量 Transformer 对照 (仅用于对照, 非架构本体)
