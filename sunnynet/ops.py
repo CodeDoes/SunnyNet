@@ -55,19 +55,21 @@ def multiscale_decay(n: int, h_min: float = 2.0, h_max: float = 8192.0,
 
 
 def logspace_scan(nu: torch.Tensor, p: torch.Tensor, s0: torch.Tensor,
-                  chunk: int = 64) -> tuple[torch.Tensor, torch.Tensor]:
+                  chunk: int = 64, p_min_hint: float | None = None) -> tuple[torch.Tensor, torch.Tensor]:
     """一阶线性递推 s_t = p_t*s_{t-1} + (1-p_t)*nu_t 的闭式解.
 
     记 P_j = sum_{k<=j} ln p_k (inclusive), g_k = (1-p_k)*nu_k:
         s_j = exp(P_j) * ( s_in + sum_{k<=j} g_k * exp(-P_k) )
     两次 inclusive cumsum 得到整块状态, 块间串行 T/chunk 次.
 
+    p_min_hint 给定时直接用其限制块长, 跳过 p.amin() 的同步开销; 取值不变.
     nu, p: (B,T,N);  s0: (B,N) -> (states (B,T,N), s_T (B,N))
     """
     B, T, N = nu.shape
     lp = torch.log(p)
     g = (1.0 - p) * nu
-    chunk = _safe_chunk(p.detach().amin().item(), chunk)
+    p_min = p.detach().amin().item() if p_min_hint is None else p_min_hint
+    chunk = _safe_chunk(p_min, chunk)
     s = s0
     outs = []
     for start in range(0, T, chunk):
@@ -80,8 +82,8 @@ def logspace_scan(nu: torch.Tensor, p: torch.Tensor, s0: torch.Tensor,
     return torch.cat(outs, dim=1), s
 
 
-def _safe_chunk(p_min: float, requested: int, headroom_bits: int = 48) -> int:
-    """按 p 最小值限制块长, 使 exp(-P) <= 2^48 不溢出. 取值与块长无关."""
+def _safe_chunk(p_min: float, requested: int, headroom_bits: int = 64) -> int:
+    """按 p 最小值限制块长, 使 exp(-P) <= 2^headroom_bits. 取值与块长无关."""
     if p_min <= 0 or p_min >= 1:
         return min(requested, 64)
     per_bit = -math.log(p_min)

@@ -94,7 +94,7 @@ def build_models(arch: str, vocab: int, preset: str, ablation: dict | None,
 
     target = sunny.num_params(non_embedding=True)
     bcfg, bn, rel = solve_baseline_for_params(target, vocab, n_layers=6, n_heads=8,
-                                              max_len=max(seq_len, 512))
+                                              max_len=max(seq_len, 2048))
     base = TransformerLM(bcfg)
     print(f"[baseline] 以 SunnyNet 计算栈参数 {target:,} 为目标, "
           f"选中 d_model={bcfg.d_model} d_ff={bcfg.d_ff} "
@@ -218,7 +218,7 @@ def main():
         if (step + 1) % args.val_every == 0 or step == args.steps - 1:
             vl = evaluate(model, val_batches)
             t_eval = time.perf_counter() - t_start
-            rec = {"step": step + 1, "train_loss": round(float(loss), 6),
+            rec = {"step": step + 1, "train_loss": round(float(loss.detach()), 6),
                    "val_loss": round(vl, 6), "ppl": round(math.exp(min(vl, 20)), 4),
                    "ms_per_token": round(perf.ms_per_token, 6),
                    "tokens_per_sec": round(perf.tokens_per_sec, 2),
@@ -273,10 +273,10 @@ def main():
         p.write_text(json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"    日志 -> {p}")
 
-    if args.save_ckpt and args.arch == "sunnynet":
+    if args.save_ckpt:
         cp = Path(args.save_ckpt)
         cp.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"model": model.state_dict(),
+        torch.save({"arch": args.arch, "model": model.state_dict(),
                     "config": cfg.__dict__ if hasattr(cfg, "__dict__") else cfg,
                     "summary": log["summary"]}, cp)
         print(f"    checkpoint -> {cp}")

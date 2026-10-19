@@ -112,6 +112,7 @@ class SunnyBlock(nn.Module):
         self.b_gain = nn.Parameter(torch.tensor(0.5))
         self.register_buffer("delta", multiscale_decay(dim, h_min, h_max), persistent=True)
         self.p_floor = 1.0 / h_max
+        self.p_min_bound = float((1.0 - self.delta.max()).item())
         self.group = _pick_group(dim, group)
         self._init_spectral(rho0, decay_beta, layer_index, rank, generator)
 
@@ -184,7 +185,7 @@ class SunnyBlock(nn.Module):
         pad = (-T) % chunk
         ap = torch.cat([a, a.new_zeros(B, pad, D)], dim=1) if pad else a
         u, gate, p = self._core(ap)
-        states, _ = logspace_scan(u, p, s, chunk=chunk)
+        states, _ = logspace_scan(u, p, s, chunk=chunk, p_min_hint=self.p_min_bound)
         out = self._emit(u, states, s)
         if pad:
             out = out[:, :T]

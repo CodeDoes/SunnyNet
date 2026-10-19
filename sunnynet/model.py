@@ -47,8 +47,8 @@ class SunnyConfig:
 
     @staticmethod
     def scale05b(vocab_size: int) -> "SunnyConfig":
-        return SunnyConfig(vocab_size=vocab_size, dim=1536, inner=2560, rank=896,
-                           layers=16, h_max=32768.0)
+        return SunnyConfig(vocab_size=vocab_size, dim=2048, inner=3584, rank=1280,
+                           layers=18, h_max=32768.0)
 
 
 class SunnyNet(nn.Module):
