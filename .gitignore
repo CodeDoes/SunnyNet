@@ -1,0 +1,28 @@
+# 语料与中间产物 (体积大, 由 prepare_data.py / build_corpus.py 重新生成)
+data/
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 测试与缓存
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 实验日志
+*.log
+
+# 本地工作记忆 (仅本机, 不入库)
+.workbuddy/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini

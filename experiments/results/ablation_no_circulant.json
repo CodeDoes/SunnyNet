@@ -1,0 +1,109 @@
+{
+  "arch": "sunnynet",
+  "preset": "small",
+  "params": 1413896,
+  "params_non_embed": 365320,
+  "threads": 8,
+  "args": {
+    "arch": "sunnynet",
+    "preset": "small",
+    "steps": 600,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 60,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 150,
+    "val_batches": 8,
+    "patience": 4,
+    "no_early_stop": false,
+    "out": "experiments/results/ablation_no_circulant.json",
+    "ablation": "circulant=0",
+    "mix": "",
+    "save_ckpt": ""
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {
+    "circulant": false
+  },
+  "history": [
+    {
+      "step": 150,
+      "train_loss": 4.413483,
+      "val_loss": 4.873965,
+      "ppl": 130.8386,
+      "ms_per_token": 0.340298,
+      "tokens_per_sec": 2938.6,
+      "grad_norm": 0.875871,
+      "lr": 0.00282304,
+      "peak_rss_mb": 858.2,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 110.27
+    },
+    {
+      "step": 300,
+      "train_loss": 4.971862,
+      "val_loss": 4.736107,
+      "ppl": 113.9895,
+      "ms_per_token": 0.340481,
+      "tokens_per_sec": 2937.02,
+      "grad_norm": 1.014242,
+      "lr": 0.00189216,
+      "peak_rss_mb": 858.2,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 220.42
+    },
+    {
+      "step": 450,
+      "train_loss": 3.88112,
+      "val_loss": 4.644326,
+      "ppl": 103.9932,
+      "ms_per_token": 0.325599,
+      "tokens_per_sec": 3071.26,
+      "grad_norm": 1.148961,
+      "lr": 0.00078827,
+      "peak_rss_mb": 861.6,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 317.44
+    },
+    {
+      "step": 600,
+      "train_loss": 4.221744,
+      "val_loss": 4.566304,
+      "ppl": 96.1879,
+      "ms_per_token": 0.325937,
+      "tokens_per_sec": 3068.07,
+      "grad_norm": 2.352171,
+      "lr": 0.00030002,
+      "peak_rss_mb": 861.6,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 424.53
+    }
+  ],
+  "summary": {
+    "wall_seconds": 424.53,
+    "steps_done": 600,
+    "stopped_early": false,
+    "best_val_loss": 4.566304,
+    "best_ppl": 96.1879,
+    "ms_per_token_mean": 0.325937,
+    "tokens_per_sec_mean": 3068.07,
+    "peak_rss_mb": 861.6,
+    "mean_grad_norm": 0.850321,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 4.221744
+  }
+}

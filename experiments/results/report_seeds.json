@@ -1,0 +1,238 @@
+{
+  "runs": [
+    {
+      "tag": "seed1234",
+      "summary": {
+        "arch": "sunnynet",
+        "preset": "small",
+        "params": 1413908,
+        "params_non_embed": 365332,
+        "steps_done": 600,
+        "best_val_loss": 4.568086,
+        "best_ppl": 96.3595,
+        "final_train_loss": 4.214296,
+        "ms_per_token": 0.272612,
+        "tokens_per_sec": 3668.21,
+        "peak_rss_mb": 900.7,
+        "mean_grad_norm": 0.875176,
+        "cache_hit_mean": null,
+        "cache_counter_kind": "page_faults_per_sec",
+        "wall_seconds": 357.25
+      },
+      "history": [
+        {
+          "step": 150,
+          "train_loss": 4.458821,
+          "val_loss": 4.926443,
+          "ppl": 137.8882,
+          "ms_per_token": 0.250484,
+          "tokens_per_sec": 3992.28,
+          "grad_norm": 1.339613,
+          "lr": 0.00282304,
+          "peak_rss_mb": 879.9,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 81.32
+        },
+        {
+          "step": 300,
+          "train_loss": 4.981225,
+          "val_loss": 4.742425,
+          "ppl": 114.712,
+          "ms_per_token": 0.280965,
+          "tokens_per_sec": 3559.16,
+          "grad_norm": 0.660421,
+          "lr": 0.00189216,
+          "peak_rss_mb": 900.7,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 185.33
+        },
+        {
+          "step": 450,
+          "train_loss": 3.852357,
+          "val_loss": 4.643115,
+          "ppl": 103.8674,
+          "ms_per_token": 0.261269,
+          "tokens_per_sec": 3827.47,
+          "grad_norm": 0.611521,
+          "lr": 0.00078827,
+          "peak_rss_mb": 900.7,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 257.88
+        },
+        {
+          "step": 600,
+          "train_loss": 4.214296,
+          "val_loss": 4.568086,
+          "ppl": 96.3595,
+          "ms_per_token": 0.272612,
+          "tokens_per_sec": 3668.21,
+          "grad_norm": 0.737332,
+          "lr": 0.00030002,
+          "peak_rss_mb": 900.7,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 357.25
+        }
+      ]
+    },
+    {
+      "tag": "seed2024",
+      "summary": {
+        "arch": "sunnynet",
+        "preset": "small",
+        "params": 1413908,
+        "params_non_embed": 365332,
+        "steps_done": 600,
+        "best_val_loss": 4.598389,
+        "best_ppl": 99.3242,
+        "final_train_loss": 3.474634,
+        "ms_per_token": 0.208112,
+        "tokens_per_sec": 4805.11,
+        "peak_rss_mb": 890.7,
+        "mean_grad_norm": 0.868447,
+        "cache_hit_mean": null,
+        "cache_counter_kind": "page_faults_per_sec",
+        "wall_seconds": 273.61
+      },
+      "history": [
+        {
+          "step": 150,
+          "train_loss": 5.477972,
+          "val_loss": 4.917625,
+          "ppl": 136.6777,
+          "ms_per_token": 0.225171,
+          "tokens_per_sec": 4441.07,
+          "grad_norm": 0.560556,
+          "lr": 0.00282304,
+          "peak_rss_mb": 878.1,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 74.13
+        },
+        {
+          "step": 300,
+          "train_loss": 4.220277,
+          "val_loss": 4.781092,
+          "ppl": 119.2344,
+          "ms_per_token": 0.233491,
+          "tokens_per_sec": 4282.82,
+          "grad_norm": 1.18944,
+          "lr": 0.00189216,
+          "peak_rss_mb": 878.1,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 153.06
+        },
+        {
+          "step": 450,
+          "train_loss": 5.038002,
+          "val_loss": 4.690379,
+          "ppl": 108.8944,
+          "ms_per_token": 0.222713,
+          "tokens_per_sec": 4490.08,
+          "grad_norm": 0.534832,
+          "lr": 0.00078827,
+          "peak_rss_mb": 881.1,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 219.14
+        },
+        {
+          "step": 600,
+          "train_loss": 3.474634,
+          "val_loss": 4.598389,
+          "ppl": 99.3242,
+          "ms_per_token": 0.208112,
+          "tokens_per_sec": 4805.11,
+          "grad_norm": 0.82525,
+          "lr": 0.00030002,
+          "peak_rss_mb": 890.7,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 273.61
+        }
+      ]
+    },
+    {
+      "tag": "seed3407",
+      "summary": {
+        "arch": "sunnynet",
+        "preset": "small",
+        "params": 1413908,
+        "params_non_embed": 365332,
+        "steps_done": 600,
+        "best_val_loss": 4.631586,
+        "best_ppl": 102.6768,
+        "final_train_loss": 5.141476,
+        "ms_per_token": 0.142139,
+        "tokens_per_sec": 7035.36,
+        "peak_rss_mb": 892.2,
+        "mean_grad_norm": 0.918788,
+        "cache_hit_mean": null,
+        "cache_counter_kind": "page_faults_per_sec",
+        "wall_seconds": 189.23
+      },
+      "history": [
+        {
+          "step": 150,
+          "train_loss": 4.736309,
+          "val_loss": 4.882453,
+          "ppl": 131.954,
+          "ms_per_token": 0.146982,
+          "tokens_per_sec": 6803.56,
+          "grad_norm": 0.722912,
+          "lr": 0.00282304,
+          "peak_rss_mb": 883.6,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 48.87
+        },
+        {
+          "step": 300,
+          "train_loss": 4.397484,
+          "val_loss": 4.752791,
+          "ppl": 115.9073,
+          "ms_per_token": 0.145831,
+          "tokens_per_sec": 6857.23,
+          "grad_norm": 1.250909,
+          "lr": 0.00189216,
+          "peak_rss_mb": 883.6,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 97.01
+        },
+        {
+          "step": 450,
+          "train_loss": 4.937787,
+          "val_loss": 4.679686,
+          "ppl": 107.7362,
+          "ms_per_token": 0.142952,
+          "tokens_per_sec": 6995.33,
+          "grad_norm": 0.454516,
+          "lr": 0.00078827,
+          "peak_rss_mb": 885.6,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 142.71
+        },
+        {
+          "step": 600,
+          "train_loss": 5.141476,
+          "val_loss": 4.631586,
+          "ppl": 102.6768,
+          "ms_per_token": 0.142139,
+          "tokens_per_sec": 7035.36,
+          "grad_norm": 0.582159,
+          "lr": 0.00030002,
+          "peak_rss_mb": 892.2,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 189.23
+        }
+      ]
+    }
+  ]
+}

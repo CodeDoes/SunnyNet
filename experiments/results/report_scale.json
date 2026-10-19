@@ -1,0 +1,132 @@
+{
+  "runs": [
+    {
+      "tag": "proto20m/sunnynet",
+      "summary": {
+        "arch": "sunnynet",
+        "preset": "proto20m",
+        "params": 20955698,
+        "params_non_embed": 16761394,
+        "steps_done": 300,
+        "best_val_loss": 5.488265,
+        "best_ppl": 241.8372,
+        "final_train_loss": 4.795945,
+        "ms_per_token": 3.164184,
+        "tokens_per_sec": 316.04,
+        "peak_rss_mb": 2579.0,
+        "mean_grad_norm": 1.845751,
+        "cache_hit_mean": null,
+        "cache_counter_kind": "page_faults_per_sec",
+        "wall_seconds": 1986.85
+      },
+      "history": [
+        {
+          "step": 100,
+          "train_loss": 5.264446,
+          "val_loss": 5.732548,
+          "ppl": 308.755,
+          "ms_per_token": 2.527072,
+          "tokens_per_sec": 395.71,
+          "grad_norm": 1.924731,
+          "lr": 0.00178082,
+          "peak_rss_mb": 2567.6,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 531.01
+        },
+        {
+          "step": 200,
+          "train_loss": 6.044428,
+          "val_loss": 5.554531,
+          "ppl": 258.4057,
+          "ms_per_token": 2.476966,
+          "tokens_per_sec": 403.72,
+          "grad_norm": 0.841986,
+          "lr": 0.00079105,
+          "peak_rss_mb": 2579.0,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 1038.04
+        },
+        {
+          "step": 300,
+          "train_loss": 4.795945,
+          "val_loss": 5.488265,
+          "ppl": 241.8372,
+          "ms_per_token": 3.164184,
+          "tokens_per_sec": 316.04,
+          "grad_norm": 1.265658,
+          "lr": 0.00020007,
+          "peak_rss_mb": 2579.0,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 1986.85
+        }
+      ]
+    },
+    {
+      "tag": "proto20m/transformer",
+      "summary": {
+        "arch": "transformer",
+        "preset": "proto20m",
+        "params": 21288240,
+        "params_non_embed": 16762160,
+        "steps_done": 300,
+        "best_val_loss": 5.095532,
+        "best_ppl": 163.2907,
+        "final_train_loss": 4.240265,
+        "ms_per_token": 2.28054,
+        "tokens_per_sec": 438.49,
+        "peak_rss_mb": 1689.2,
+        "mean_grad_norm": 1.38455,
+        "cache_hit_mean": null,
+        "cache_counter_kind": "page_faults_per_sec",
+        "wall_seconds": 1430.11
+      },
+      "history": [
+        {
+          "step": 100,
+          "train_loss": 4.799327,
+          "val_loss": 5.461006,
+          "ppl": 235.3339,
+          "ms_per_token": 2.359133,
+          "tokens_per_sec": 423.88,
+          "grad_norm": 1.65994,
+          "lr": 0.00356164,
+          "peak_rss_mb": 1684.9,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 492.09
+        },
+        {
+          "step": 200,
+          "train_loss": 5.849539,
+          "val_loss": 5.190545,
+          "ppl": 179.5665,
+          "ms_per_token": 2.264287,
+          "tokens_per_sec": 441.64,
+          "grad_norm": 0.759484,
+          "lr": 0.00158209,
+          "peak_rss_mb": 1689.2,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 947.84
+        },
+        {
+          "step": 300,
+          "train_loss": 4.240265,
+          "val_loss": 5.095532,
+          "ppl": 163.2907,
+          "ms_per_token": 2.28054,
+          "tokens_per_sec": 438.49,
+          "grad_norm": 0.778834,
+          "lr": 0.00040013,
+          "peak_rss_mb": 1689.2,
+          "cache_hit": null,
+          "page_faults_per_sec": null,
+          "elapsed_s": 1430.11
+        }
+      ]
+    }
+  ]
+}

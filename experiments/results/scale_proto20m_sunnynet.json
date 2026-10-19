@@ -1,0 +1,93 @@
+{
+  "arch": "sunnynet",
+  "preset": "proto20m",
+  "params": 20955698,
+  "params_non_embed": 16761394,
+  "threads": 8,
+  "args": {
+    "arch": "sunnynet",
+    "preset": "proto20m",
+    "steps": 300,
+    "batch_size": 4,
+    "seq_len": 512,
+    "lr": 0.002,
+    "warmup": 40,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 100,
+    "val_batches": 6,
+    "patience": 4,
+    "no_early_stop": false,
+    "out": "experiments/results/scale_proto20m_sunnynet.json",
+    "ablation": "",
+    "mix": "",
+    "save_ckpt": ""
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [
+    {
+      "step": 100,
+      "train_loss": 5.264446,
+      "val_loss": 5.732548,
+      "ppl": 308.755,
+      "ms_per_token": 2.527072,
+      "tokens_per_sec": 395.71,
+      "grad_norm": 1.924731,
+      "lr": 0.00178082,
+      "peak_rss_mb": 2567.6,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 531.01
+    },
+    {
+      "step": 200,
+      "train_loss": 6.044428,
+      "val_loss": 5.554531,
+      "ppl": 258.4057,
+      "ms_per_token": 2.476966,
+      "tokens_per_sec": 403.72,
+      "grad_norm": 0.841986,
+      "lr": 0.00079105,
+      "peak_rss_mb": 2579.0,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 1038.04
+    },
+    {
+      "step": 300,
+      "train_loss": 4.795945,
+      "val_loss": 5.488265,
+      "ppl": 241.8372,
+      "ms_per_token": 3.164184,
+      "tokens_per_sec": 316.04,
+      "grad_norm": 1.265658,
+      "lr": 0.00020007,
+      "peak_rss_mb": 2579.0,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 1986.85
+    }
+  ],
+  "summary": {
+    "wall_seconds": 1986.85,
+    "steps_done": 300,
+    "stopped_early": false,
+    "best_val_loss": 5.488265,
+    "best_ppl": 241.8372,
+    "ms_per_token_mean": 3.164184,
+    "tokens_per_sec_mean": 316.04,
+    "peak_rss_mb": 2579.0,
+    "mean_grad_norm": 1.845751,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 4.795945
+  }
+}

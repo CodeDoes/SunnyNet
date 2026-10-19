@@ -1,0 +1,74 @@
+{
+  "lrs": {
+    "sunnynet": 0.003,
+    "transformer": 0.006
+  },
+  "steps": 600,
+  "threads": 8,
+  "latency": {
+    "sunnynet": [
+      {
+        "seq_len": 256,
+        "ms": 45.638,
+        "ms_per_token": 0.1783,
+        "params": 1413908
+      },
+      {
+        "seq_len": 512,
+        "ms": 80.302,
+        "ms_per_token": 0.1568,
+        "params": 1413908
+      },
+      {
+        "seq_len": 1024,
+        "ms": 147.661,
+        "ms_per_token": 0.1442,
+        "params": 1413908
+      },
+      {
+        "seq_len": 2048,
+        "ms": 215.822,
+        "ms_per_token": 0.1054,
+        "params": 1413908
+      },
+      {
+        "seq_len": 4096,
+        "ms": 319.929,
+        "ms_per_token": 0.0781,
+        "params": 1413908
+      }
+    ],
+    "transformer": [
+      {
+        "seq_len": 256,
+        "ms": 17.547,
+        "ms_per_token": 0.0685,
+        "params": 1379824
+      },
+      {
+        "seq_len": 512,
+        "ms": 62.517,
+        "ms_per_token": 0.1221,
+        "params": 1410544
+      },
+      {
+        "seq_len": 1024,
+        "ms": 167.023,
+        "ms_per_token": 0.1631,
+        "params": 1471984
+      },
+      {
+        "seq_len": 2048,
+        "ms": 542.125,
+        "ms_per_token": 0.2647,
+        "params": 1594864
+      },
+      {
+        "seq_len": 4096,
+        "ms": 4041.773,
+        "ms_per_token": 0.9868,
+        "params": 1840624
+      }
+    ]
+  }
+}

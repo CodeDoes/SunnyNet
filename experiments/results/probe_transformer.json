@@ -1,0 +1,78 @@
+{
+  "arch": "transformer",
+  "preset": "small",
+  "params": 1055328,
+  "params_non_embed": 359008,
+  "threads": 8,
+  "args": {
+    "arch": "transformer",
+    "preset": "small",
+    "steps": 60,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 40,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 50,
+    "val_batches": 8,
+    "patience": 4,
+    "no_early_stop": false,
+    "out": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\results\\probe_transformer.json",
+    "ablation": "",
+    "mix": ""
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [
+    {
+      "step": 50,
+      "train_loss": 5.576048,
+      "val_loss": 5.359617,
+      "ppl": 212.6434,
+      "ms_per_token": 0.193668,
+      "tokens_per_sec": 5163.48,
+      "grad_norm": 0.568295,
+      "lr": 0.00186119,
+      "peak_rss_mb": 869.6,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 21.87
+    },
+    {
+      "step": 60,
+      "train_loss": 5.403594,
+      "val_loss": 5.306351,
+      "ppl": 201.6131,
+      "ms_per_token": 0.190909,
+      "tokens_per_sec": 5238.09,
+      "grad_norm": 0.495198,
+      "lr": 0.00031662,
+      "peak_rss_mb": 905.5,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 26.76
+    }
+  ],
+  "summary": {
+    "wall_seconds": 26.76,
+    "steps_done": 60,
+    "stopped_early": false,
+    "best_val_loss": 5.306351,
+    "best_ppl": 201.6131,
+    "ms_per_token_mean": 0.190909,
+    "tokens_per_sec_mean": 5238.09,
+    "peak_rss_mb": 905.5,
+    "mean_grad_norm": 1.25101,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 5.403594
+  }
+}
