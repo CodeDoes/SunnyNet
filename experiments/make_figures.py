@@ -316,6 +316,81 @@ def fig_longseq_train():
     return True
 
 
+def fig_on_compare():
+    """七架构同协议对比: 质量 / 速度 双 panel (按 ppl 排序)."""
+    files = {}
+    for p in sorted(RES.glob("oncompare_*.json")):
+        name = p.stem.replace("oncompare_", "")
+        files[name] = json.loads(p.read_text(encoding="utf-8"))
+    if len(files) < 2:
+        return False
+    order = ["sunnynet", "transformer", "linear_attn", "rwkv", "mamba", "hyena", "h3"]
+    names = [n for n in order if n in files]
+    ppl = [files[n]["summary"]["best_ppl"] for n in names]
+    mst = [files[n]["summary"]["ms_per_token_mean"] for n in names]
+    colors = [ACCENT if n == "sunnynet" else (WARM if n == "transformer" else MUTED)
+              for n in names]
+    fig, axes = plt.subplots(1, 2, figsize=(12.8, 4.2))
+    for ax, vals, title, fmt in (
+            (axes[0], ppl, L("验证困惑度 (越低越好)", "val perplexity (lower better)"), "{:.0f}"),
+            (axes[1], mst, L("每 token 耗时 ms (越低越好)", "ms/token (lower better)"), "{:.3f}")):
+        b = ax.bar(names, vals, color=colors, width=0.6)
+        ax.set_title(title)
+        ax.grid(axis="x", visible=False)
+        for rect, v in zip(b, vals):
+            ax.text(rect.get_x() + rect.get_width() / 2, v, fmt.format(v),
+                    ha="center", va="bottom", fontsize=8.6, color=INK)
+        ax.set_ylim(0, max(vals) * 1.22)
+        ax.tick_params(axis="x", rotation=20)
+    handles = [plt.Rectangle((0, 0), 1, 1, color=ACCENT),
+               plt.Rectangle((0, 0), 1, 1, color=WARM),
+               plt.Rectangle((0, 0), 1, 1, color=MUTED)]
+    fig.legend(handles, [L("SunnyNet", "SunnyNet"), "Transformer",
+                         L("同复杂度 O(N) 架构", "O(N) peers")],
+               loc="upper center", ncol=3, frameon=False, fontsize=9,
+               bbox_to_anchor=(0.5, 1.0))
+    fig.suptitle(L("同计算栈参数量下的七架构对比（T=256, 600 步）",
+                   "Seven architectures at matched stack params (T=256, 600 steps)"),
+                 fontsize=11.5, weight="bold", y=1.06)
+    fig.savefig(FIG / "on_compare.png")
+    plt.close(fig)
+    return True
+
+
+def fig_on_scaling():
+    """七架构 ms/token vs 序列长度 (log-log), 检验 O(N) 缩放是否同益同行."""
+    p = RES / "on_scaling_t8.json"
+    if not p.exists():
+        return False
+    d = json.loads(p.read_text(encoding="utf-8"))
+    order = ["sunnynet", "transformer", "linear_attn", "rwkv", "mamba", "hyena", "h3"]
+    names = [n for n in order if n in d]
+    lens = [r["seq_len"] for r in d["sunnynet"]]
+    fig, ax = plt.subplots(figsize=(9.2, 5.0))
+    for name in names:
+        ys = [r["ms_per_token"] for r in d[name]]
+        if name == "sunnynet":
+            style = dict(color=ACCENT, lw=2.6, ms=6, zorder=5)
+        elif name == "transformer":
+            style = dict(color=WARM, lw=2.0, ms=5, zorder=4)
+        else:
+            style = dict(color=MUTED, lw=1.2, ms=3.6, alpha=0.85)
+        ax.plot(lens, ys, marker="o", label=name, **style)
+    ax.set_xscale("log", base=2)
+    ax.set_yscale("log")
+    ax.set_xticks(lens)
+    ax.set_xticklabels([str(t) for t in lens])
+    ax.set_xlabel(L("序列长度 T", "sequence length T"))
+    ax.set_ylabel(L("每 token 前向耗时 ms (对数轴)", "ms per token, forward (log)"))
+    ax.set_title(L("七架构 ms/token 随序列长度变化（batch=1, 8 线程, 进程隔离）",
+                   "ms/token vs T, seven architectures (batch=1, 8 threads, isolated)"),
+                 fontsize=10.6, weight="bold")
+    ax.legend(frameon=False, ncol=4, fontsize=8.6)
+    fig.savefig(FIG / "on_scaling.png")
+    plt.close(fig)
+    return True
+
+
 def fig_seq_scaling():
     p = RES / "seq_scaling.json"
     if not p.exists():
@@ -382,6 +457,8 @@ def main():
         "ablation": fig_ablation,
         "scaling": fig_seq_scaling,
         "longseq": fig_longseq_train,
+        "oncompare": fig_on_compare,
+        "onscaling": fig_on_scaling,
     }
     for k, fn in todo.items():
         if args.only and args.only != k:

@@ -1,66 +1,150 @@
 {
   "sunnynet": [
     {
+      "arch": "sunnynet",
+      "seq_len": 128,
+      "ms": 14.0139,
+      "ms_per_token": 0.10948,
+      "min_ms": 11.5629,
+      "iqr_pct": 19.41,
+      "stack": 365332
+    },
+    {
+      "arch": "sunnynet",
       "seq_len": 256,
-      "ms": 45.638,
-      "ms_per_token": 0.1783,
-      "params": 1413908
+      "ms": 19.5365,
+      "ms_per_token": 0.07631,
+      "min_ms": 18.8667,
+      "iqr_pct": 3.46,
+      "stack": 365332
     },
     {
+      "arch": "sunnynet",
       "seq_len": 512,
-      "ms": 80.302,
-      "ms_per_token": 0.1568,
-      "params": 1413908
+      "ms": 26.3671,
+      "ms_per_token": 0.0515,
+      "min_ms": 22.9284,
+      "iqr_pct": 12.39,
+      "stack": 365332
     },
     {
+      "arch": "sunnynet",
+      "seq_len": 768,
+      "ms": 34.567,
+      "ms_per_token": 0.04501,
+      "min_ms": 31.5003,
+      "iqr_pct": 8.55,
+      "stack": 365332
+    },
+    {
+      "arch": "sunnynet",
       "seq_len": 1024,
-      "ms": 147.661,
-      "ms_per_token": 0.1442,
-      "params": 1413908
+      "ms": 49.9676,
+      "ms_per_token": 0.0488,
+      "min_ms": 46.1003,
+      "iqr_pct": 6.33,
+      "stack": 365332
     },
     {
+      "arch": "sunnynet",
+      "seq_len": 1536,
+      "ms": 57.9717,
+      "ms_per_token": 0.03774,
+      "min_ms": 51.0334,
+      "iqr_pct": 13.35,
+      "stack": 365332
+    },
+    {
+      "arch": "sunnynet",
       "seq_len": 2048,
-      "ms": 215.822,
-      "ms_per_token": 0.1054,
-      "params": 1413908
+      "ms": 98.0793,
+      "ms_per_token": 0.04789,
+      "min_ms": 79.6288,
+      "iqr_pct": 6.7,
+      "stack": 365332
     },
     {
+      "arch": "sunnynet",
       "seq_len": 4096,
-      "ms": 319.929,
-      "ms_per_token": 0.0781,
-      "params": 1413908
+      "ms": 148.6602,
+      "ms_per_token": 0.03629,
+      "min_ms": 144.7183,
+      "iqr_pct": 3.94,
+      "stack": 365332
     }
   ],
   "transformer": [
     {
+      "arch": "transformer",
+      "seq_len": 128,
+      "ms": 7.4513,
+      "ms_per_token": 0.05821,
+      "min_ms": 5.133,
+      "iqr_pct": 25.62,
+      "stack": 361952
+    },
+    {
+      "arch": "transformer",
       "seq_len": 256,
-      "ms": 17.547,
-      "ms_per_token": 0.0685,
-      "params": 1379824
+      "ms": 13.4575,
+      "ms_per_token": 0.05257,
+      "min_ms": 10.7539,
+      "iqr_pct": 15.04,
+      "stack": 361952
     },
     {
+      "arch": "transformer",
       "seq_len": 512,
-      "ms": 62.517,
-      "ms_per_token": 0.1221,
-      "params": 1410544
+      "ms": 40.8079,
+      "ms_per_token": 0.0797,
+      "min_ms": 38.2109,
+      "iqr_pct": 5.97,
+      "stack": 361952
     },
     {
+      "arch": "transformer",
+      "seq_len": 768,
+      "ms": 87.3281,
+      "ms_per_token": 0.11371,
+      "min_ms": 82.16,
+      "iqr_pct": 2.77,
+      "stack": 361952
+    },
+    {
+      "arch": "transformer",
       "seq_len": 1024,
-      "ms": 167.023,
-      "ms_per_token": 0.1631,
-      "params": 1471984
+      "ms": 141.2441,
+      "ms_per_token": 0.13793,
+      "min_ms": 134.2303,
+      "iqr_pct": 6.61,
+      "stack": 361952
     },
     {
+      "arch": "transformer",
+      "seq_len": 1536,
+      "ms": 315.4172,
+      "ms_per_token": 0.20535,
+      "min_ms": 302.3753,
+      "iqr_pct": 4.0,
+      "stack": 361952
+    },
+    {
+      "arch": "transformer",
       "seq_len": 2048,
-      "ms": 542.125,
-      "ms_per_token": 0.2647,
-      "params": 1594864
+      "ms": 638.24,
+      "ms_per_token": 0.31164,
+      "min_ms": 604.0724,
+      "iqr_pct": 6.31,
+      "stack": 361952
     },
     {
+      "arch": "transformer",
       "seq_len": 4096,
-      "ms": 4041.773,
-      "ms_per_token": 0.9868,
-      "params": 1840624
+      "ms": 3373.4155,
+      "ms_per_token": 0.82359,
+      "min_ms": 3162.9241,
+      "iqr_pct": 2.69,
+      "stack": 361952
     }
   ]
 }
