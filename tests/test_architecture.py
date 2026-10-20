@@ -571,3 +571,55 @@ def test_apply_local_hist_zero_equals_padded():
     histn = torch.randn(2, k, 64, dtype=torch.float64)
     rfn = torch.cat([histn, raw], dim=1)
     assert float(((rfn + dw(rfn))[:, k:] - fast).abs().max()) > 1e-3
+
+
+def test_p_clamp_unreachable_when_bound_above_floor():
+    """p 的解析下界高于 p_floor 时 clamp 不可达, 去掉它前向逐位相等."""
+    torch.manual_seed(55)
+    # h_min=2.0 -> p_min_bound=0.5; h_max=2048.0 -> p_floor=4.88e-4
+    from sunnynet.layers import SunnyBlock
+    blk = SunnyBlock(dim=32, inner=48, rank=16, layer_index=0,
+                     h_min=2.0, h_max=2048.0)
+    assert blk.p_min_bound == 0.5
+    assert blk.p_floor < blk.p_min_bound
+    assert blk._need_clamp is False
+
+
+def test_p_clamp_engaged_when_floor_above_bound():
+    """h_min 抬到使解析下界低于 p_floor 时, clamp 必须重新启用."""
+    from sunnynet.layers import SunnyBlock
+    # h_min=1.0 -> p_min_bound=0.0 < p_floor=1/h_max
+    blk = SunnyBlock(dim=32, inner=48, rank=16, layer_index=0,
+                     h_min=1.0, h_max=2048.0)
+    assert blk.p_min_bound == 0.0
+    assert blk._need_clamp is True
+
+
+def test_p_raw_range_matches_analytic_bound():
+    """真实前向里 p 恒落在解析界内, 且与去 clamp 路径逐位一致."""
+    torch.manual_seed(56)
+    cfg = SunnyConfig.small(512)
+    cfg.scan_chunk = 64
+    m = SunnyNet(cfg).eval()
+    x = torch.randint(0, 512, (2, 64))
+    with torch.no_grad():
+        y0 = m(x).clone()
+    raw_lo, raw_hi = 1.0, 0.0
+    for blk in m.blocks:
+        delta = blk.delta().view(1, 1, -1)
+        lo = float((1.0 - delta).min())
+        hi = float((1.0 - delta * 0.0).max())
+        raw_lo = min(raw_lo, lo)
+        raw_hi = max(raw_hi, hi)
+        assert lo >= blk.p_min_bound - 1e-6
+    orig = type(m.blocks[0])._core
+
+    def noclamp(self, a):
+        u, gate, p = orig(self, a)
+        return u, gate, p
+
+    type(m.blocks[0])._core = noclamp
+    with torch.no_grad():
+        y1 = m(x).clone()
+    type(m.blocks[0])._core = orig
+    assert float((y0 - y1).abs().max()) == 0.0

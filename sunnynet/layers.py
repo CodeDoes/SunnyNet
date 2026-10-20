@@ -123,6 +123,9 @@ class SunnyBlock(nn.Module):
         self.theta = nn.Parameter(self.h_logit0.clone())
         self.p_floor = 1.0 / h_max
         self.p_min_bound = float((1.0 - 1.0 / h_min))
+        # p = 1 - delta*(1-sigmoid(gate)), delta<=1/h_min, 故 p>=p_min_bound; 上界恒 <1.
+        # 解析下界已高于 p_floor 时 clamp 不可达, 构造期判掉省一次全宽张量往返.
+        self._need_clamp = self.p_min_bound < self.p_floor
         self.group = _pick_group(dim, group)
         self._init_spectral(rho0, decay_beta, layer_index, rank, generator)
 
@@ -169,7 +172,9 @@ class SunnyBlock(nn.Module):
             p = 1.0 - delta * (1.0 - torch.sigmoid(gate))
         else:
             p = (1.0 - delta).expand_as(u)
-        return u, gate, p.clamp(self.p_floor, 1.0)
+        if self._need_clamp:
+            p = p.clamp(self.p_floor, 1.0)
+        return u, gate, p
 
     def _prev(self, states: torch.Tensor, s_in: torch.Tensor) -> torch.Tensor:
         """位置 0 用 s_in, 其余用前一步状态."""
