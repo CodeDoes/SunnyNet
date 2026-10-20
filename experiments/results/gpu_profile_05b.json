@@ -1,0 +1,85 @@
+{
+ "gpu_profile": {
+  "gpu": "NVIDIA GeForce GTX 1060",
+  "torch": "2.7.1+cu118",
+  "T": 512,
+  "B": 8,
+  "eval": {
+   "total_us": 366534,
+   "cumsum_scan_pct": 1.85,
+   "sigmoid_gate_pct": 2.55,
+   "aten_mm_plus_sgemm_pct": 32.8,
+   "aten_roll_pct": 3.13
+  },
+  "train": {
+   "total_us": 1062457,
+   "cumsum_scan_pct": 1.22,
+   "sigmoid_gate_pct": 2.02,
+   "aten_mm_plus_sgemm_pct": 28.6,
+   "aten_roll_pct": 1.91
+  },
+  "note": "CUDA kernel 级 self time 聚合, 12 次平均; scan/gate 占比远低于 CPU (31.6%)"
+ },
+ "compete_bench": {
+  "cuda": {
+   "roll_us": 2349.73,
+   "index_us": 1683.8,
+   "ratio": 0.717,
+   "fwd_maxdiff": 0.0,
+   "grad_maxdiff": 0.0
+  },
+  "cpu": {
+   "roll_us": 15518.77,
+   "index_us": 13819.86,
+   "ratio": 0.891,
+   "fwd_maxdiff": 0.0,
+   "grad_maxdiff": 0.0
+  }
+ },
+ "compete_e2e": {
+  "cuda": {
+   "roll": [
+    59.571,
+    56.867
+   ],
+   "index": [
+    58.621,
+    64.575
+   ],
+   "loss": 9.034,
+   "verdict": "端到端无稳定差异 (轮间极差 13.5%)"
+  },
+  "cpu": {
+   "roll": [
+    548.139,
+    520.642
+   ],
+   "index": [
+    519.951,
+    546.962
+   ],
+   "loss": 9.035,
+   "verdict": "端到端持平 (0.2%)"
+  }
+ },
+ "05b_train": {
+  "T64_30step": {
+   "loss_first": 9.3587,
+   "loss_last": 9.2953,
+   "loss_delta": -0.0634,
+   "peak_mb": 4118,
+   "note": "仍为噪声内, 无下降趋势"
+  },
+  "T128_30step": {
+   "loss_first": 9.3152,
+   "loss_last": 9.3103,
+   "loss_delta": -0.0049,
+   "peak_mb": 4425,
+   "note": "仍为噪声内"
+  },
+  "stability": "T=128 三次运行 1 次通过 2 次首步 OOM (仅 3.74GB 即失败, nvidia-smi 显示 6GB 空闲); WDDM 显存悬崖",
+  "adamw": "OOM",
+  "momentum_sgd": "OOM",
+  "lr3e-3": "首步 backward OOM"
+ }
+}
