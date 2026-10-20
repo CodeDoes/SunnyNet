@@ -17,6 +17,9 @@ htmlcov/
 # 实验日志
 *.log
 
+# 本机环境探测脚本 (含绝对路径, 无移植价值)
+experiments/_*.bat
+
 # 本地工作记忆 (仅本机, 不入库)
 .workbuddy/
 

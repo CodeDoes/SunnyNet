@@ -1,0 +1,47 @@
+{
+  "sunnynet": [
+    {
+      "arch": "sunnynet",
+      "seq_len": 4096,
+      "ms": 7624.4167,
+      "ms_per_token": 0.23268,
+      "min_ms": 7125.7085,
+      "iqr_pct": 9.87,
+      "stack": 365844
+    }
+  ],
+  "mamba": [
+    {
+      "arch": "mamba",
+      "seq_len": 4096,
+      "ms": 6113.9726,
+      "ms_per_token": 0.18658,
+      "min_ms": 5650.233,
+      "iqr_pct": 11.52,
+      "stack": 367136
+    }
+  ],
+  "h3": [
+    {
+      "arch": "h3",
+      "seq_len": 4096,
+      "ms": 5432.6739,
+      "ms_per_token": 0.16579,
+      "min_ms": 5386.0069,
+      "iqr_pct": 10.24,
+      "stack": 354640
+    }
+  ],
+  "hyena": [
+    {
+      "arch": "hyena",
+      "seq_len": 4096,
+      "ms": 3679.8237,
+      "ms_per_token": 0.1123,
+      "min_ms": 3523.3571,
+      "iqr_pct": 7.89,
+      "stack": 369488
+    }
+  ],
+  "transformer": []
+}

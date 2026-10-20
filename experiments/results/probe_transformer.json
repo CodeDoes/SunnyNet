@@ -20,7 +20,7 @@
     "val_batches": 8,
     "patience": 4,
     "no_early_stop": false,
-    "out": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\results\\probe_transformer.json",
+    "out": "experiments\\results\\probe_transformer.json",
     "ablation": "",
     "mix": ""
   },

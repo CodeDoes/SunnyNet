@@ -1,0 +1,79 @@
+{
+  "arch": "sunnynet",
+  "preset": "p100mw",
+  "params": 105363240,
+  "params_non_embed": 93828904,
+  "threads": 8,
+  "args": {
+    "arch": "sunnynet",
+    "preset": "p100mw",
+    "steps": 100,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 30,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 50,
+    "val_batches": 6,
+    "patience": 4,
+    "no_early_stop": true,
+    "out": "experiments/results/sc_100m_sunnynet.json",
+    "ablation": "",
+    "mix": "",
+    "save_ckpt": ""
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [
+    {
+      "step": 50,
+      "train_loss": 5.420451,
+      "val_loss": 5.18318,
+      "ppl": 178.2488,
+      "ms_per_token": 4.554679,
+      "tokens_per_sec": 219.55,
+      "grad_norm": 1.86206,
+      "lr": 0.00253822,
+      "peak_rss_mb": 5021.2,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 483.79
+    },
+    {
+      "step": 100,
+      "train_loss": 5.225205,
+      "val_loss": 4.695621,
+      "ppl": 109.4667,
+      "ms_per_token": 4.724124,
+      "tokens_per_sec": 211.68,
+      "grad_norm": 1.100347,
+      "lr": 0.00030136,
+      "peak_rss_mb": 5056.4,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 1002.62
+    }
+  ],
+  "summary": {
+    "wall_seconds": 1002.62,
+    "steps_done": 100,
+    "stopped_early": false,
+    "best_val_loss": 4.695621,
+    "best_ppl": 109.4667,
+    "ms_per_token_mean": 4.724124,
+    "tokens_per_sec_mean": 211.68,
+    "peak_rss_mb": 5056.4,
+    "mean_grad_norm": 2.655591,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 5.225205
+  }
+}

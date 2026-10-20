@@ -87,10 +87,25 @@ class DomainMixer:
         return out
 
 
+def _preset_cfg(preset: str, vocab: int) -> SunnyConfig:
+    if preset == "proto20m":
+        return SunnyConfig.proto20m(vocab)
+    if preset == "proto20mw":
+        return SunnyConfig(vocab_size=vocab, dim=640, inner=1280, rank=384,
+                           layers=6, h_max=8192.0)
+    if preset == "p100m":
+        return SunnyConfig(vocab_size=vocab, dim=1024, inner=1792, rank=640,
+                           layers=14, h_max=16384.0)
+    if preset == "p100mw":
+        return SunnyConfig(vocab_size=vocab, dim=1408, inner=1920, rank=1024,
+                           layers=8, h_max=16384.0)
+    return SunnyConfig.small(vocab)
+
+
 def build_models(arch: str, vocab: int, preset: str, ablation: dict | None,
                  seq_len: int, seed: int):
     torch.manual_seed(seed)
-    sunny_cfg = SunnyConfig.proto20m(vocab) if preset == "proto20m" else SunnyConfig.small(vocab)
+    sunny_cfg = _preset_cfg(preset, vocab)
     if ablation:
         sunny_cfg.ablation = dict(ablation)
     sunny_cfg.scan_chunk = 64
@@ -105,7 +120,7 @@ def build_models(arch: str, vocab: int, preset: str, ablation: dict | None,
                                                   max_len=max(seq_len, 2048))
         base = TransformerLM(bcfg)
     else:
-        nl = 6 if preset == "proto20m" else 4
+        nl = {"proto20m": 6, "proto20mw": 5, "p100m": 8, "p100mw": 8}.get(preset, 4)
         bcfg, bn, rel = build_linear_baseline(arch, target, vocab,
                                               max_len=max(seq_len, 2048), n_layers=nl)
         base = _LMBase(bcfg)
@@ -141,7 +156,8 @@ def evaluate(model, batches, device="cpu") -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", choices=ARCH_CHOICES, default="sunnynet")
-    ap.add_argument("--preset", choices=["small", "proto20m"], default="small")
+    ap.add_argument("--preset", choices=["small", "proto20m", "proto20mw", "p100m", "p100mw"],
+                    default="small")
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--seq-len", type=int, default=256)

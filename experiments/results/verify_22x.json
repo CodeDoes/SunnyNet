@@ -1,0 +1,60 @@
+{
+  "sunnynet": [
+    {
+      "arch": "sunnynet",
+      "seq_len": 1024,
+      "ms": 35.7636,
+      "ms_per_token": 0.03493,
+      "min_ms": 30.2841,
+      "iqr_pct": 10.99,
+      "stack": 365844
+    },
+    {
+      "arch": "sunnynet",
+      "seq_len": 2048,
+      "ms": 70.3532,
+      "ms_per_token": 0.03435,
+      "min_ms": 58.4014,
+      "iqr_pct": 20.72,
+      "stack": 365844
+    },
+    {
+      "arch": "sunnynet",
+      "seq_len": 4096,
+      "ms": 131.9262,
+      "ms_per_token": 0.03221,
+      "min_ms": 124.2899,
+      "iqr_pct": 10.64,
+      "stack": 365844
+    }
+  ],
+  "transformer": [
+    {
+      "arch": "transformer",
+      "seq_len": 1024,
+      "ms": 189.319,
+      "ms_per_token": 0.18488,
+      "min_ms": 168.8208,
+      "iqr_pct": 19.87,
+      "stack": 369200
+    },
+    {
+      "arch": "transformer",
+      "seq_len": 2048,
+      "ms": 799.8956,
+      "ms_per_token": 0.39057,
+      "min_ms": 691.936,
+      "iqr_pct": 15.81,
+      "stack": 369200
+    },
+    {
+      "arch": "transformer",
+      "seq_len": 4096,
+      "ms": 3709.9193,
+      "ms_per_token": 0.90574,
+      "min_ms": 3165.2178,
+      "iqr_pct": 14.55,
+      "stack": 369200
+    }
+  ]
+}

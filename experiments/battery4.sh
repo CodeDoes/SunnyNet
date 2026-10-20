@@ -1,5 +1,5 @@
 set -u
-PY="C:/Users/陈旭/.workbuddy/binaries/python/envs/sunnynet/Scripts/python.exe"
+PY="${PYTHON_BIN:-python}"
 R=experiments/results
 mkdir -p $R
 

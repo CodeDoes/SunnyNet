@@ -1,5 +1,5 @@
 set -u
-PY="C:/Users/陈旭/.workbuddy/binaries/python/envs/sunnynet/Scripts/python.exe"
+PY="${PYTHON_BIN:-python}"
 R=experiments/results
 mkdir -p $R
 run(){ echo "=== $* "; "$PY" -X utf8 train/train.py "$@" 2>&1 | grep -E "^  step|^===|基线|访存|params|早停"; }
