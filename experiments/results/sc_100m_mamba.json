@@ -1,0 +1,51 @@
+{
+  "arch": "mamba",
+  "preset": "p100mw",
+  "params": 103240800,
+  "params_non_embed": 93410400,
+  "threads": 8,
+  "args": {
+    "arch": "mamba",
+    "preset": "p100mw",
+    "steps": 100,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 30,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 50,
+    "val_batches": 6,
+    "patience": 4,
+    "no_early_stop": true,
+    "out": "experiments/results/sc_100m_mamba.json",
+    "ablation": "",
+    "mix": "",
+    "save_ckpt": ""
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [],
+  "summary": {
+    "wall_seconds": 327.52,
+    "steps_done": 37,
+    "stopped_early": false,
+    "diverged": true,
+    "best_val_loss": null,
+    "best_ppl": null,
+    "ms_per_token_mean": 4.307333,
+    "tokens_per_sec_mean": 232.16,
+    "peak_rss_mb": 4680.0,
+    "mean_grad_norm": NaN,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": null
+  }
+}

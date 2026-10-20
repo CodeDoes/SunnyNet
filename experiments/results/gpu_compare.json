@@ -1,0 +1,50 @@
+[
+  {
+    "preset": "small",
+    "T": 512,
+    "B": 8,
+    "cpu_fwd_ms": 138.77,
+    "cpu_step_ms": 569.85,
+    "cpu_peak_rss_mb": 1131,
+    "gpu_fwd_ms": 17.41,
+    "gpu_step_ms": 57.457,
+    "fwd_speedup": 7.97,
+    "step_speedup": 9.92
+  },
+  {
+    "preset": "small",
+    "T": 1024,
+    "B": 8,
+    "cpu_fwd_ms": 439.323,
+    "cpu_step_ms": 1186.303,
+    "cpu_peak_rss_mb": 1875,
+    "gpu_fwd_ms": 28.901,
+    "gpu_step_ms": 98.968,
+    "fwd_speedup": 15.2,
+    "step_speedup": 11.99
+  },
+  {
+    "preset": "proto20mw",
+    "T": 512,
+    "B": 8,
+    "cpu_fwd_ms": 1697.749,
+    "cpu_step_ms": 4620.765,
+    "cpu_peak_rss_mb": 3235,
+    "gpu_fwd_ms": 121.455,
+    "gpu_step_ms": 384.56,
+    "fwd_speedup": 13.98,
+    "step_speedup": 12.02
+  },
+  {
+    "preset": "proto20mw",
+    "T": 1024,
+    "B": 8,
+    "cpu_fwd_ms": 3308.538,
+    "cpu_step_ms": 9408.918,
+    "cpu_peak_rss_mb": 5883,
+    "gpu_fwd_ms": 244.438,
+    "gpu_step_ms": 751.992,
+    "fwd_speedup": 13.54,
+    "step_speedup": 12.51
+  }
+]

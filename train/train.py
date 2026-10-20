@@ -226,6 +226,7 @@ def main():
            "params_non_embed": n_ne, "threads": th, "args": vars(args),
            "mix": weights, "ablation": ablation, "history": []}
     best_val, bad, stopped = float("inf"), 0, False
+    diverged = False
     t_start = time.perf_counter()
 
     for step in range(args.steps):
@@ -244,6 +245,11 @@ def main():
 
         ntok = x.numel()
         perf.update(ntok, dt, gn, cache)
+
+        if not math.isfinite(gn) or not loss.isfinite():
+            print(f"  [发散] step {step+1}: loss={float(loss):.4f} grad_norm={gn}")
+            diverged = True
+            break
 
         rec = None
         if (step + 1) % args.val_every == 0 or step == args.steps - 1:
@@ -280,6 +286,7 @@ def main():
         "wall_seconds": round(wall, 2),
         "steps_done": step + 1,
         "stopped_early": stopped,
+        "diverged": diverged,
         "best_val_loss": round(best_val, 6) if best_val < float("inf") else None,
         "best_ppl": round(math.exp(min(best_val, 20)), 4) if best_val < float("inf") else None,
         "ms_per_token_mean": round(perf.ms_per_token, 6),
@@ -291,7 +298,7 @@ def main():
         "cache_counter_kind": perf.cache_kind,
         "page_faults_per_sec_mean": (round(perf.mean_page_faults, 2)
                                      if perf.mean_page_faults is not None else None),
-        "final_train_loss": round(float(loss), 6),
+        "final_train_loss": round(float(loss.detach()), 6) if loss.isfinite() else None,
     }
     print(f"=== 完成 wall={wall:.1f}s  {log['summary']['ms_per_token_mean']:.3f} ms/token  "
           f"peak_rss={log['summary']['peak_rss_mb']:.0f}MB  "

@@ -113,8 +113,12 @@ def logspace_scan(nu: torch.Tensor, p: torch.Tensor, s0: torch.Tensor,
 
 
 def _safe_chunk(p_min: float, requested: int, headroom_bits: int = 64) -> int:
-    """按 p 最小值限制块长, 使 exp(-P) <= 2^headroom_bits. 取值与块长无关."""
-    if p_min <= 0 or p_min >= 1:
+    """按 p 最小值限制块长, 使 exp(-P) <= 2^headroom_bits. 取值与块长无关.
+
+    p_min 非有限 (上游发散) 时无法约束, 返回保守块长; NaN 与 0/1 比较恒 False,
+    不先判 isfinite 会落到 int(nan).
+    """
+    if not math.isfinite(p_min) or p_min <= 0 or p_min >= 1:
         return min(requested, 64)
     per_bit = -math.log(p_min)
     if per_bit <= 0:
