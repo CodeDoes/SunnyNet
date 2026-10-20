@@ -226,10 +226,11 @@ def test_gradients_finite_and_nonvanishing():
 
 
 def test_gradient_stable_across_depth():
-    """无残差深堆叠: 输入嵌入梯度范数随深度不应呈指数衰减.
+    """默认配置下深堆叠: 输入嵌入梯度范数随深度不应呈指数衰减.
 
     谱半径 rho0=1.0 / decay_beta=0 为实测标定值; 改回层深衰减 rho_l=rho0*(l+1)^-beta
-    会在本测试立即失败, 作为回归防线保留.
+    会在本测试立即失败, 作为回归防线保留. 默认含残差旁路 (见 §5), 故此处守的是
+    连同残差在内的完整默认通路.
     """
     norms = []
     for L in (4, 12, 24):
@@ -251,19 +252,29 @@ def test_gradient_stable_across_depth():
 
 
 def test_spectral_scale_decides_depth_stability():
-    """回归防线: 谱半径必须定标到 ρ=1, 欠缩放会让梯度随深度崩塌.
+    """回归防线 (关闭残差, 只看状态接力通路): 谱半径必须定标到 ρ≈1.
 
-    实测 (新架构, 24 层 / 4 层 梯度比):
-        ρ0=0.3 -> 0         ρ0=0.5 -> 0        ρ0=0.7 -> 2.3e-5
-        ρ0=1.0 -> 4.2e+0 (稳定)
-    层深衰减 ρ_l = ρ0(l+1)^-β 等价于深层欠缩放, 同样崩塌
-    (ρ0=1.0, β=0.15 时 24 层梯度仅 9.7e-8).
-    因此 ρ0=1.0 / β=0 是收敛的必要条件, 不容改回.
+    实测 (无残差, 24 层/4 层梯度范数比, CSN 真实归一化 s_min=0.02):
+        ρ0=0.1 -> 1.0e+0(真零)   ρ0=0.2 -> 1.1e-4 (崩塌)
+        ρ0=0.3 -> 0.92           ρ0=0.5 -> 1.03
+        ρ0=0.7 -> 1.58           ρ0=1.0 -> 6.58
+        ρ0=1.0,β=0.15 -> 1.52    ρ0=2.0 -> 3.5e+2 (爆炸)
+
+    修正记录: 该边界随 CSN 地板系统性移动 —— ρ0 崩塌点由 s_min=0.25 时的
+    "≤0.5" 下移到 s_min=0.05 的 "≤0.3"、再下移到 s_min=0.02 的 "≤0.2"。
+    原因: 地板越小, 归一化越接近真方差归一化, 越能补偿深层欠缩放, 故旧防线
+    "β>0 必崩塌" 与 "ρ0=0.5 崩塌" 只对欠归一化的旧 CSN 成立, 均已作废。
+
+    默认配置已加残差旁路, 崩塌不再出现 (见下一个测试), 故此处显式关闭残差,
+    使这条防线守的是"状态接力总线"。
     """
-    def grads(L, rho0, beta):
+    no_resid = {"residual": False}
+
+    def grads(L, rho0, beta, ab=None):
         torch.manual_seed(7)
         cfg = SunnyConfig(vocab_size=256, dim=128, inner=192, rank=64,
-                          layers=L, rho0=rho0, decay_beta=beta)
+                          layers=L, rho0=rho0, decay_beta=beta,
+                          ablation=dict(ab or no_resid))
         m = SunnyNet(cfg)
         idx = torch.randint(0, 256, (2, 128))
         loss = torch.nn.functional.cross_entropy(
@@ -273,11 +284,40 @@ def test_spectral_scale_decides_depth_stability():
         g = m.embed.weight.grad
         return g.norm().item() if g is not None else 0.0
 
-    assert grads(24, 0.5, 0.0) < 1e-9, "欠缩放应导致 24 层梯度崩塌"
-    assert grads(24, 1.0, 0.15) < 1e-5, "层深衰变应导致 24 层梯度崩塌"
-    assert grads(24, 1.0, 0.0) > 1e-2, "定标配置 ρ=1/β=0 梯度应健全"
-    ratio = grads(24, 1.0, 0.0) / max(grads(4, 1.0, 0.0), 1e-12)
-    assert 0.1 < ratio < 100, f"定标配置深度比异常 {ratio}"
+    def ratio(L1, L2, rho0, beta):
+        return grads(L1, rho0, beta) / max(grads(L2, rho0, beta), 1e-30)
+
+    assert ratio(24, 4, 0.2, 0.0) < 1e-2, "重欠缩放 ρ0=0.2 应导致 24 层梯度崩塌"
+    assert ratio(24, 4, 1.0, 0.0) > 0.5, "定标 ρ=1 梯度应随深度健全"
+    assert 0.1 < ratio(24, 4, 1.0, 0.15) < 100, "真实归一化下 β=0.15 不再单独崩塌"
+    assert ratio(24, 4, 2.0, 0.0) > 10, "过缩放应随深度放大梯度"
+
+
+def test_residual_removes_depth_collapse():
+    """残差旁路使欠缩放深堆叠不再梯度崩塌 (默认配置).
+
+    实测 (ρ0=0.2, 24 层/4 层梯度比, s_min=0.02): 有残差 1.20, 无残差 1.1e-4。
+    用 ρ0=0.2 而非旧记录的 0.5/0.3: CSN 地板下调后归一化补偿增强, 崩塌点随之
+    下移 (0.25->≤0.5, 0.05->≤0.3, 0.02->≤0.2), 故崩塌对照点必须跟随下移以保持
+    判别力。残差提供一条不经过状态接力的直连通路, 使谱锚定不再是深度的唯一保障。
+    """
+    def g(L, rho0, residual):
+        torch.manual_seed(7)
+        cfg = SunnyConfig(vocab_size=256, dim=128, inner=192, rank=64,
+                          layers=L, rho0=rho0, ablation={"residual": residual})
+        m = SunnyNet(cfg)
+        idx = torch.randint(0, 256, (2, 128))
+        loss = torch.nn.functional.cross_entropy(
+            m(idx).reshape(-1, 256), idx.reshape(-1))
+        m.zero_grad(set_to_none=True)
+        loss.backward()
+        g_ = m.embed.weight.grad
+        return g_.norm().item() if g_ is not None else 0.0
+
+    without = g(24, 0.2, False) / max(g(4, 0.2, False), 1e-30)
+    with_res = g(24, 0.2, True) / max(g(4, 0.2, True), 1e-30)
+    assert without < 1e-2, f"无残差时欠缩放应崩塌, 实测比 {without}"
+    assert with_res > 0.5, f"有残差时不应崩塌, 实测比 {with_res}"
 
 
 # ---------------------------------------------------------------- 初始化
@@ -449,6 +489,9 @@ def test_pretokenize_splits_scripts():
     {"circulant": False},
     {"local_taps": False},
     {"current": False},
+    {"residual": False},
+    {"state_norm": True},
+    {"state_mul": True},
 ])
 def test_ablation_switches_run(flags):
     torch.manual_seed(43)

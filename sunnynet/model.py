@@ -1,9 +1,10 @@
 """SunnyNet 模型主体 (原创通用序列神经网络).
 
-结构: 嵌入 -> N 个 SunnyBlock (滚动状态逐层接力, 无残差相加) -> 终态归一 -> 绑定 LM Head.
+结构: 嵌入 -> N 个 SunnyBlock (滚动状态逐层接力 + 特征残差流) -> 终态归一 -> 绑定 LM Head.
 
-跨层信息传递: 第 l 块的末态 s_l 直接作为第 l+1 块的初始状态, 中间不经过任何
-加法旁路. 尺度由 CenteredScaleNorm 与谱锚定初始化共同锁定, 深度靠状态自身承载.
+跨层信息传递: 第 l 块的末态 s_l 直接作为第 l+1 块的初始状态 (状态接力);
+块输出 o 与输入 x 残差相加后作为下一块输入 (特征残差流)。
+尺度由 CenteredScaleNorm 与谱锚定初始化共同锁定。
 """
 from __future__ import annotations
 

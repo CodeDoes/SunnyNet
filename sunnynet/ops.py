@@ -11,6 +11,7 @@ __all__ = [
     "softwedge",
     "CenteredScaleNorm",
     "multiscale_decay",
+    "horizon_logit",
     "logspace_scan",
     "gated_scan",
 ]
@@ -27,9 +28,12 @@ def softwedge(z: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
 
 
 class CenteredScaleNorm(nn.Module):
-    """y = gamma * (x - mean + c) / sqrt(var + s_min^2 + eps)."""
+    """y = gamma * (x - mean + c) / sqrt(var + s_min^2 + eps).
 
-    def __init__(self, dim: int, eps: float = 1e-5, s_min: float = 0.25):
+    s_min 必须低于实际激活尺度 (small 预设低至 0.02), 否则归一化退化为常数缩放.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-5, s_min: float = 0.02):
         super().__init__()
         self.eps = eps
         self.s_min = s_min
@@ -53,6 +57,12 @@ def multiscale_decay(n: int, h_min: float = 2.0, h_max: float = 8192.0,
         t = torch.arange(n, device=device, dtype=dtype) / (n - 1.0)
         h = torch.exp(lo + (hi - lo) * t)
     return 1.0 / h
+
+
+def horizon_logit(n: int, device=None, dtype=torch.float32) -> torch.Tensor:
+    """theta 初值: 使 H = h_min*(h_max/h_min)^sigmoid(theta) 对数均匀, 取通道中点避开 ±inf."""
+    s = (torch.arange(n, device=device, dtype=dtype) + 0.5) / n
+    return torch.log(s) - torch.log1p(-s)
 
 
 def gated_scan(p: torch.Tensor, g: torch.Tensor, s0: torch.Tensor,

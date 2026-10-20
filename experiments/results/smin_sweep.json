@@ -1,0 +1,25 @@
+{
+  "experiment": "CenteredScaleNorm s_min 扫描（含残差旁路，600 步 / T=256 / batch=8 / lr=3e-3 / warmup=60）",
+  "protocol": "experiments/_cell_ab.py，每格独立子进程，seed 1234 与 2024",
+  "note": "s_min250 复现了此前 residual 变体的 67.3976 / 70.7208，确认可复现",
+  "rows": [
+    {"s_min": 0.250, "seed": 1234, "ppl": 67.3976},
+    {"s_min": 0.250, "seed": 2024, "ppl": 70.7208},
+    {"s_min": 0.100, "seed": 1234, "ppl": 62.2347},
+    {"s_min": 0.100, "seed": 2024, "ppl": 60.1000},
+    {"s_min": 0.050, "seed": 1234, "ppl": 59.1904},
+    {"s_min": 0.050, "seed": 2024, "ppl": 57.5058},
+    {"s_min": 0.025, "seed": 1234, "ppl": 58.2264},
+    {"s_min": 0.025, "seed": 2024, "ppl": 56.7931},
+    {"s_min": 0.015, "seed": 1234, "ppl": 57.6041},
+    {"s_min": 0.015, "seed": 2024, "ppl": 57.2311}
+  ],
+  "means": [
+    {"s_min": 0.250, "mean_ppl": 69.0592},
+    {"s_min": 0.100, "mean_ppl": 61.1674},
+    {"s_min": 0.050, "mean_ppl": 58.3481},
+    {"s_min": 0.025, "mean_ppl": 57.5098},
+    {"s_min": 0.015, "mean_ppl": 57.4176}
+  ],
+  "conclusion": "ppl 随 s_min 单调下降（0.25→0.015 区间），尚未触底；地板越小归一化越接近真方差归一化。旧默认 0.25 的退化最严重。"
+}

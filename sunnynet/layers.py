@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import torch
@@ -11,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .init import orthogonal_spectrum_
-from .ops import CenteredScaleNorm, logspace_scan, multiscale_decay, softwedge
+from .ops import (CenteredScaleNorm, horizon_logit, logspace_scan, softwedge)
 
 __all__ = ["StateCirculant", "DepthwiseCausal", "SunnyBlock", "SunnyState"]
 
@@ -97,9 +98,14 @@ class SunnyBlock(nn.Module):
         self.use_circulant = ab.get("circulant", True)
         self.use_local_taps = ab.get("local_taps", True)
         self.use_current = ab.get("current", True)
+        self.use_residual = ab.get("residual", True)
+        self.use_state_norm = ab.get("state_norm", False)
+        self.use_state_mul = ab.get("state_mul", False)
 
         self.norm_in = CenteredScaleNorm(dim)
         self.norm_mix = CenteredScaleNorm(inner)
+        self.norm_s = CenteredScaleNorm(dim) if self.use_state_norm else None
+        self.W_g = nn.Linear(inner, dim, bias=False) if self.use_state_mul else None
         self.circ = StateCirculant(dim) if self.use_circulant else None
         self.dw = DepthwiseCausal(dim, taps) if (self.use_local_taps and taps > 1) else None
         self.V = nn.Linear(dim, rank, bias=False)
@@ -110,11 +116,21 @@ class SunnyBlock(nn.Module):
 
         self.a = nn.Parameter(torch.tensor(0.5))
         self.b_gain = nn.Parameter(torch.tensor(0.5))
-        self.register_buffer("delta", multiscale_decay(dim, h_min, h_max), persistent=True)
+        self.h_min, self.h_max = h_min, h_max
+        self.register_buffer("h_logit0", horizon_logit(dim), persistent=True)
+        self.register_buffer("delta_max", torch.tensor(1.0 / h_min), persistent=True)
+        self.register_buffer("delta_min", torch.tensor(1.0 / h_max), persistent=True)
+        self.theta = nn.Parameter(self.h_logit0.clone())
         self.p_floor = 1.0 / h_max
-        self.p_min_bound = float((1.0 - self.delta.max()).item())
+        self.p_min_bound = float((1.0 - 1.0 / h_min))
         self.group = _pick_group(dim, group)
         self._init_spectral(rho0, decay_beta, layer_index, rank, generator)
+
+    def delta(self) -> torch.Tensor:
+        """逐通道遗忘上界 delta_i = 1/H_i, H 在对数刻度上扫 h_min~h_max."""
+        span = math.log(self.h_max / self.h_min)
+        H = self.h_min * torch.exp(span * torch.sigmoid(self.theta))
+        return 1.0 / H
 
     def _init_spectral(self, rho0, beta, layer_index, rank, generator):
         rho = rho0 * (float(layer_index + 1) ** -beta)
@@ -146,10 +162,11 @@ class SunnyBlock(nn.Module):
         q = self.U(self.V(a))
         u_raw, gate = q.split(self.dim, dim=-1)
         u = u_raw * self._compete(gate)
+        delta = self.delta().view(1, 1, -1)
         if self.use_decay_gate:
-            p = 1.0 - self.delta.view(1, 1, -1) * (1.0 - torch.sigmoid(gate))
+            p = 1.0 - delta * (1.0 - torch.sigmoid(gate))
         else:
-            p = (1.0 - self.delta).view(1, 1, -1).expand_as(u)
+            p = (1.0 - delta).expand_as(u)
         return u, gate, p.clamp(self.p_floor, 1.0)
 
     def _feedback(self, states: torch.Tensor, s_in: torch.Tensor) -> torch.Tensor:
@@ -159,12 +176,20 @@ class SunnyBlock(nn.Module):
         prev = torch.cat([s_in[:, None, :], states[:, :-1]], dim=1)
         return self.circ(prev)
 
-    def _emit(self, u: torch.Tensor, states: torch.Tensor, s_in: torch.Tensor):
+    def _readout(self, u: torch.Tensor, s_prev: torch.Tensor):
+        """输出侧非线性支路, 前向与单步共用."""
         if self.use_current:
-            y = self.norm_mix(softwedge(self.W_z(u), self.a.tanh()))
-        else:
-            y = self.norm_mix(self.W_z(u))
-        return self.W_c(y) + self.b_gain * states + self.W_s(self._feedback(states, s_in))
+            return self.norm_mix(softwedge(self.W_z(u), self.a.tanh()))
+        return self.norm_mix(self.W_z(u))
+
+    def _emit(self, u: torch.Tensor, states: torch.Tensor, s_in: torch.Tensor):
+        y = self._readout(u, None)
+        sn = self.norm_s(states) if self.norm_s is not None else states
+        core = self.W_c(y) + self.b_gain * sn + self.W_s(self._feedback(states, s_in))
+        if self.use_state_mul:
+            # 乘性读出: 局部支路与状态支路相乘 (H3 风格门控), 再与原加性读出相加
+            core = core + self.W_g(y) * sn
+        return core
 
     def forward(self, x: torch.Tensor, s: torch.Tensor, hist: torch.Tensor):
         """x (B,T,D) -> (out, s_T, hist_new).
@@ -190,6 +215,8 @@ class SunnyBlock(nn.Module):
         if pad:
             out = out[:, :T]
             states = states[:, :T]
+        if self.use_residual:
+            out = out + x
         return out, states[:, -1], hist_new
 
     def step(self, x_t: torch.Tensor, s: torch.Tensor, hist: torch.Tensor):
@@ -205,9 +232,11 @@ class SunnyBlock(nn.Module):
         u_t, gate, p_t = u_t[:, 0], gate[:, 0], p_t[:, 0]
         s_new = p_t * s + (1.0 - p_t) * u_t
         prev = self.circ(s) if self.circ is not None else s
-        if self.use_current:
-            y = self.norm_mix(softwedge(self.W_z(u_t), self.a.tanh()))
-        else:
-            y = self.norm_mix(self.W_z(u_t))
-        out = self.W_c(y) + self.b_gain * s_new + self.W_s(prev)
+        y = self._readout(u_t[:, None, :], None)[:, 0]
+        sn = self.norm_s(s_new[:, None, :])[:, 0] if self.norm_s is not None else s_new
+        out = self.W_c(y) + self.b_gain * sn + self.W_s(prev)
+        if self.use_state_mul:
+            out = out + self.W_g(y) * sn
+        if self.use_residual:
+            out = out + x_t
         return out, s_new, hist_new
