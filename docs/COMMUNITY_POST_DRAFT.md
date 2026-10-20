@@ -11,7 +11,7 @@
 
 ### 标题备选
 
-- `SunnyNet: an O(N) CPU-first sequence architecture — 22.7× faster than a size-matched Transformer at T=4096 (forward), but slower than Mamba/RWKV at short T. Looking for feedback.`
+- `An O(N) CPU-first sequence architecture — at T=256 its training step now ties RWKV, but the tie only holds at 4 layers. Full measurements, including where it loses.`
 - `An O(N) linear-recurrence architecture with pairwise competition gating — measured scaling data, including results where it loses`
 
 ### 正文
@@ -58,17 +58,43 @@ At 20M params, size-matched against hand-written Mamba/H3/Hyena/RWKV baselines
 | H3 | 16,862,256 | 86.99 |
 | Hyena | 16,801,776 | 109.07 |
 
+#### Training step speed (measured, fwd+bwd+update, ms/token)
+
+Isolated subprocess per cell, 5 rounds, median. Size-matched ~365k compute stack:
+
+| arch | T=256 | T=512 |
+|---|---|---|
+| **SunnyNet `smalln80`** | **0.0953** | 0.0986 |
+| RWKV | 0.0982 | **0.0951** |
+| H3 | 0.1138 | 0.1239 |
+| SunnyNet `dim=128` (older) | 0.1158 | 0.1243 |
+| Mamba | 0.1292 | 0.1271 |
+| Hyena | 0.1312 | 0.1468 |
+| Linear attention | 0.1569 | 0.1676 |
+
+Two equivalent changes got it here: removing an unreachable `clamp` (proved
+unreachable by sampling `p ∈ [0.5902, 0.99994]` vs a floor of `4.88e-4`) and
+narrowing the residual stream at equal stack params (the per-element ops pay by
+activation width, so `dim 128 → 80` buys ~18% and costs quality).
+
 #### Where it loses (measured — please read)
 
-- **Training step (fwd+bwd) is still slower than Mamba/H3/Hyena**: 8–37% at 20M,
-  20–52% at 1.4M. There is **no crossover** on training speed up to T=4096.
-  The 22.7× is *forward-only latency*, not training throughput.
+- **The RWKV tie is statistical parity, not a win.** Over 9 paired rounds,
+  SunnyNet won only 3/9 at T=256 and 4/9 at T=512; the paired-ratio median is
+  1.042 / 1.006 while the ratio-of-medians favors it. Three metrics disagree →
+  I write "ties RWKV", not "beats RWKV".
+- **Parity holds only at `L=4`.** At `L=6` (matching RWKV's depth) every
+  equal-budget narrow config is **30–40% slower**. My alignment protocol
+  matches stack params, not layer count — so the tie uses fewer layers. I
+  consider this the biggest caveat.
+- **Quality costs.** The narrow config's 600-step ppl is **62.37** vs **54.89**
+  for the wide `dim=128` config. Also 2nd of 7 archs vs H3 (53.93). Speed and
+  quality moved in opposite directions — this is a trade, not a free lunch.
+- **T=256 is the sweet spot.** At T=512 RWKV edges ahead again.
 - **Short sequences are bad**: crossover vs Transformer is around T≈384
-  (6-layer control). Below that it's slower.
-- **Quality gap at small scale**: at 1.4M/T=256 it's 2nd of 7 archs, ~7% behind
-  H3. The comparison is not converged and mostly single-seed.
-- **0.5B doesn't run here**: 15.9 GB machine, the 481M-param stack OOMs on
-  instantiation. So the scaling story only goes up to 100M.
+  (6-layer control). The 22.7× headline is *forward-only latency* at batch=1.
+- **0.5B doesn't run here**: 15.9 GB machine, the 498M-param model OOMs on
+  instantiation with AdamW. Scaling story stops at 100M.
 
 #### Two things I found that might interest others
 
@@ -104,7 +130,7 @@ setup — I'd rather fix the comparison than defend the number.
 
 ### 标题备选
 
-- `我做了一个原创 O(N) 序列架构，CPU 上 T=4096 前向比 Transformer 快 22.7 倍——但训练比 Mamba 慢，数据都放出来了`
+- `我做了一个原创 O(N) 序列架构：CPU 上 T=4096 前向比 Transformer 快 22.7 倍，训练步与 RWKV 持平——但持平只在 4 层下成立，数据全放出来了`
 - `SunnyNet：一份"包含失败结果"的 O(N) 架构实测报告`
 
 ### 正文
@@ -142,11 +168,17 @@ setup — I'd rather fix the comparison than defend the number.
 
 **输的部分（如实说）**
 
-- **训练步（前向+反向）仍比 Mamba/H3/Hyena 慢**：20M 规模慢 8–37%，1.4M 规模慢 20–52%，
-  到 T=4096 都没有交叉点。**22.7× 是前向延迟比，不是训练速度比。**
-- **短序列不行**：与 Transformer 的交叉点约 T≈384。短于它更慢。
-- **小规模质量只排第二**：1.4M/T=256 七架构对比，落后 H3 约 7%，且未收敛、以单种子为主。
-- **0.5B 跑不了**：15.9GB 机器，481M 栈参数实例化直接 OOM，scaling 只能讲到 100M。
+- **与 RWKV 的"持平"是统计持平，不是赢**：9 轮逐轮配对，T=256 只赢 3/9、T=512 只赢 4/9；
+  配对中位比值 1.042 / 1.006，但"中位数之比"又偏向它。**三个指标互相矛盾**，
+  所以我写"持平"，不写"超越"。
+- **持平只在 `L=4` 下成立**：层数对齐到 RWKV 的 `L=6` 时，同预算窄配置**反慢 30–40%**。
+  我的对齐协议按"栈参数量"对齐、不约束层数 —— 也就是说这个持平**建立在用更少层上**。
+  这是我认为最该说清楚的局限。
+- **质量是有代价的**：窄配置 600 步 ppl **62.37**，宽的 `dim=128` 是 **54.89**。
+  速度和质量往相反方向走 —— 是权衡，不是双赢。
+- **T=256 是最佳点**：到 T=512，RWKV 又反超回来。
+- **短序列不行**：与 Transformer 交叉点约 T≈384。而那个 22.7× 是 batch=1 的**纯前向延迟**。
+- **0.5B 跑不了**：15.9GB 机器，498M 参数实例化直接 OOM。scaling 只能讲到 100M。
 
 **两个我觉得别人可能用得上的发现**
 
@@ -172,7 +204,8 @@ setup — I'd rather fix the comparison than defend the number.
 - [ ] 所有数字与 `experiments/results/*.json` 对得上（**不要凭记忆写数字**）
 - [ ] 保留"输的部分"整段，不得删除
 - [ ] 明示"这是作者自荐"，遵守各社区 self-promotion 规则
-- [ ] 同一内容不在多个仓库重复刷；在 Mamba/RWKV 仓库发帖时**以提问为主**，
-      介绍自己的项目为辅
+- [ ] **每到一个社区改写开头与结尾**，不照搬正文（同日跨版同文会被判 spam）
+- [ ] 在 Mamba/RWKV 社区发帖时**以提问为主**，介绍项目为辅
 - [ ] 不用机器人账号、不批量刷帖、不买赞
 - [ ] 英文帖不要机翻痕迹过重（可请母语者过一眼）
+- [ ] 渠道清单与节奏见 `docs/COMMUNITY_CHANNELS.md`
