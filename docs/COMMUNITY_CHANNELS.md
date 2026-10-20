@@ -42,15 +42,19 @@
 | **HazyResearch/zoology** | https://github.com/HazyResearch/zoology | **可以（限合成任务）** | README Notes：*"We wholeheartedly welcome contributions for new synthetics (MQAR variants) — feel free to make a PR or email us!"* |
 | **radarFudan / dongzhuoyao - Awesome-state-space-models** | https://github.com/radarFudan/Awesome-state-space-models | **可以（PR 补条目）** | 论文/仓库精选表，含 unofficial 实现栏 |
 
-### B 类：没有 GitHub Discussions，走外部社区
+### B 类：RWKV 走 Discussions + Discord 双通道
 
 | 社区 | 入口 | 说明 |
 |---|---|---|
-| **RWKV 官方 Discord** | https://discord.gg/bDSBUMeFpc | RWKV-LM README 上的官方邀请链接。**已确认 RWKV-LM 没有 Discussions 标签页**，全部讨论在 Discord |
+| **RWKV-LM · Show and tell** | https://github.com/BlinkDL/RWKV-LM/discussions/categories/show-and-tell | **有 Discussions**，分类含 Announcements / General / Ideas / Q&A / Show and tell；`#189` 是第三方实现帖先例 |
+| **RWKV 官方 Discord** | https://discord.gg/bDSBUMeFpc | 作者在 `#174` 欢迎帖中指向的主渠道 |
 | **RWKV 官网 / Wiki** | https://rwkv.com · https://wiki.rwkv.com | wiki 有 community / code-of-conduct 页 |
 | **HazyResearch 系（H3/Hyena）** | https://github.com/HazyResearch/safari | 仓库 README 明确 *"We're happy to share independent reimplementations and explainer posts"* |
 
-**⚠️ 关键澄清**：RWKV 仓库里那份 "400+ RWKV projects" 列表是**用 GitHub 搜索 `rwkv` 关键字生成的**，不是投稿列表。SunnyNet **不是 RWKV 项目**，硬塞进去就是错误归类 —— 不要做。
+**⚠️ 上一版此处有误，已更正**：曾写"RWKV-LM 没有 Discussions 标签页"，实测为**错误**——
+`github.com/BlinkDL/RWKV-LM/discussions` 正常存在。作者只是**更推荐** Discord，并非没有 Discussions。
+
+**⚠️ 另一个不要碰的**：RWKV 仓库里那份 "400+ RWKV projects" 列表是**用 GitHub 搜索 `rwkv` 关键字生成的**，不是投稿列表。SunnyNet **不是 RWKV 项目**，硬塞进去就是错误归类 —— 不要做。
 
 ### C 类：通用技术社区（需遵守自荐比例规则）
 
@@ -101,14 +105,18 @@ An O(N) CPU-first linear-recurrence architecture — measured step-time now matc
 | Hyena | 392,760 | 0.1312 | 0.1468 | — |
 | Linear attn | 364,720 | 0.1569 | 0.1676 | 91.91 |
 
-### 2.2 RWKV Discord
+### 2.2 RWKV：Discussions 与 Discord 两处
 
-**注意**：Discord 上先聊天，别一进来甩链接。建议路径：
+**更正**：RWKV-LM **有** Discussions（含 `Show and tell`），作者只是更推荐 Discord。
 
-1. 先在通用频道问一个**真的问题**（例如：「你们怎么处理 RWKV 的状态递推在 CPU 上 `exp` 的开销？我用 `exp(-P)` 比 `exp(P)` 慢 2.2×，`reciprocal(exp(P))` 端到端却只在 T=1024 有效」）
-2. 有互动之后，再在 `#showcase` / `#research` 类频道发项目，并**明确说**「这是我的项目，想拿 RWKV 当对照基线」
+路径建议（两处都适用）：
+
+1. 先问一个**真的问题**（例如：「你们怎么处理递推里 `exp` 的开销？我用 `exp(-P)` 比 `exp(P)`
+   慢 2.2×，`reciprocal(exp(P))` 端到端却只在 T=1024 有效」）
+2. 有互动后再发项目帖，并**明确说**「这是我的项目，想拿 RWKV 当对照基线」
 
 这条「先问问题再展示」的顺序**不是技巧，是基本礼貌**，也直接决定会不会被当广告。
+完整可复制稿见 `docs/COMMUNITY_POSTS_READY.md` §3。
 
 ### 2.3 Show HN
 
