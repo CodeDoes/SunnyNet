@@ -47,7 +47,7 @@
 | 社区 | 入口 | 说明 |
 |---|---|---|
 | **RWKV-LM · Show and tell** | https://github.com/BlinkDL/RWKV-LM/discussions/categories/show-and-tell | **有 Discussions**，分类含 Announcements / General / Ideas / Q&A / Show and tell；`#189` 是第三方实现帖先例 |
-| **RWKV 官方 Discord** | https://discord.gg/bDSBUMeFpc | 作者在 `#174` 欢迎帖中指向的主渠道 |
+| **RWKV 官方 Discord** | https://discord.gg/bDSBUMeFpc | 作者在 `#174` 欢迎帖中指向的主渠道。**进服六步顺序 + Discord 口径文案见 `COMMUNITY_DISCORD_GUIDE.md`** |
 | **RWKV 官网 / Wiki** | https://rwkv.com · https://wiki.rwkv.com | wiki 有 community / code-of-conduct 页 |
 | **HazyResearch 系（H3/Hyena）** | https://github.com/HazyResearch/safari | 仓库 README 明确 *"We're happy to share independent reimplementations and explainer posts"* |
 

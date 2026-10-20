@@ -28,7 +28,7 @@ parallel cumsum-based WKV + jax/tf/keras implementations」）。
 | 1 | mamba · Show and tell | https://github.com/state-spaces/mamba/discussions/categories/show-and-tell | **能** | 同区已有 `#865` Flax 实现帖、`#844` Routed Attention 帖 |
 | 2 | mamba · Ideas | https://github.com/state-spaces/mamba/discussions/categories/ideas | **能** | `#1051`（2026-10-01）第三方自述 S-Mamba 求反馈 |
 | 3 | **RWKV-LM · Show and tell** | https://github.com/BlinkDL/RWKV-LM/discussions/categories/show-and-tell | **能** | 见上方更正；`#189` 有先例 |
-| 4 | RWKV 官方 Discord | https://discord.gg/bDSBUMeFpc | **能** | 作者主推渠道 |
+| 4 | RWKV 官方 Discord | https://discord.gg/bDSBUMeFpc | **能** | 作者主推渠道；**Discord 是聊天不是论坛，不能贴长文 → 见 `COMMUNITY_DISCORD_GUIDE.md`** |
 | 5 | **Awesome-LA-Papers** | https://github.com/HallerPatrick/Awesome-LA-Papers | **能（PR）** | README 有独立 `## Contributing` 节，明文 "We welcome contributions!"，且含 `Libraries and Implementations` 栏目 |
 | 6 | aisys-building-blocks | https://github.com/YiwenC25/aisys-building-blocks | **能（PR）** | "If you think we're missing something, please open an issue or PR!" |
 | 7 | HazyResearch/zoology | https://github.com/HazyResearch/zoology | **能（限合成任务）** | "We wholeheartedly welcome contributions for new synthetics (MQAR variants)" — 需先跑 MQAR |
