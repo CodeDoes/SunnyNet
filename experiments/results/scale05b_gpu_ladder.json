@@ -1,0 +1,19 @@
+{
+  "preset": "scale05b",
+  "params_total": 498464858,
+  "params_stack": 481687642,
+  "device": "cuda",
+  "gpu": "NVIDIA GeForce GTX 1060",
+  "gpu_total_mb": 6144,
+  "torch": "2.7.1+cu118",
+  "T": 512,
+  "levels": {
+    "L1_build_cuda": {"ok": true, "build_s": 80.74, "peak_mb": 1902},
+    "L2_fwd_B1_T512": {"ok": true, "peak_mb": 1978, "logits": [1, 512, 8192]},
+    "L3_fwd_B1_T1024": {"ok": true, "peak_mb": 2044, "logits": [1, 1024, 8192]},
+    "L4_sgd_step_B1_T512": {"ok": true, "peak_mb": 4426, "loss": 9.4842},
+    "L5_adamw_step": {"ok": false, "error": "CUDA out of memory (T=64/128/256 均失败)"}
+  },
+  "cpu_fp32_instantiation": "OOM 不可实例化",
+  "note": "前向/SGD 可运行; AdamW 因权重 1.9GB + 双动量约 3.8GB 超 6GB 而不可行; 未跑多步收敛, 无 0.5B 质量数据"
+}
