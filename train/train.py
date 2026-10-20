@@ -93,6 +93,10 @@ def _preset_cfg(preset: str, vocab: int) -> SunnyConfig:
     if preset == "proto20mw":
         return SunnyConfig(vocab_size=vocab, dim=640, inner=1280, rank=384,
                            layers=6, h_max=8192.0)
+    if preset == "smalln":
+        # 等栈参数下的窄配置: 逐元素算子按激活宽度付费, 参数挪到 rank 通路更快
+        return SunnyConfig(vocab_size=vocab, dim=96, inner=176, rank=164,
+                           layers=4, h_max=2048.0)
     if preset == "p100m":
         return SunnyConfig(vocab_size=vocab, dim=1024, inner=1792, rank=640,
                            layers=14, h_max=16384.0)
@@ -156,7 +160,7 @@ def evaluate(model, batches, device="cpu") -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", choices=ARCH_CHOICES, default="sunnynet")
-    ap.add_argument("--preset", choices=["small", "proto20m", "proto20mw", "p100m", "p100mw"],
+    ap.add_argument("--preset", choices=["small", "smalln", "proto20m", "proto20mw", "p100m", "p100mw"],
                     default="small")
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--batch-size", type=int, default=8)

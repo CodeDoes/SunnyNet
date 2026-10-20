@@ -1,19 +1,15 @@
-"""参数量对齐下的宽度/层数重平衡: 速度与质量对照.
+"""栈参数预算下的宽度配置扫描: 训练步速度 (相同参数量, 不同分配).
 
-动机: SunnyNet dim=128 比同行 d_model=88~112 宽, head 与块内 matmul 都更贵.
-在栈参数量对齐 (365,844) 前提下枚举 (dim, inner, rank, layers), 找更快的配置.
+动机: 逐元素算子按激活宽度付费. 参数量放在 rank 通路 (激活宽 2*dim)
+比放在 inner 通路 (激活宽 inner) 更"便宜". 本脚本量化该效应.
 
-用法:
-  python -X utf8 experiments/_width_sweep.py list
-  python -X utf8 experiments/_width_sweep.py bench <tag> <T> <B> <threads>
-  python -X utf8 experiments/_width_sweep.py train <tag> <steps> <T> <B> <seed>
+每格独立子进程. 只测速度, 质量另做 A/B.
+
+用法: python -X utf8 experiments/_width_sweep.py <name> [T] [B] [reps]
 """
 from __future__ import annotations
 
-import argparse
 import json
-import math
-import statistics
 import sys
 import time
 from pathlib import Path
@@ -25,140 +21,51 @@ import torch  # noqa: E402
 
 from sunnynet.model import SunnyConfig, SunnyNet  # noqa: E402
 
-TARGET = 365844
+VARIANTS = {
+    "base":   dict(dim=128, inner=192, rank=64, layers=4),
+    "A_wide_rank": dict(dim=128, inner=128, rank=112, layers=4),
+    "B_narrow_inner": dict(dim=128, inner=96, rank=128, layers=4),
+    "C_more_layers": dict(dim=96, inner=160, rank=64, layers=6),
+    "D_fewer_layers": dict(dim=128, inner=256, rank=96, layers=3),
+    "E_wide_rank_5l": dict(dim=128, inner=112, rank=80, layers=5),
+}
+NAME = sys.argv[1] if len(sys.argv) > 1 else "base"
+T = int(sys.argv[2]) if len(sys.argv) > 2 else 512
+B = int(sys.argv[3]) if len(sys.argv) > 3 else 8
+REPS = int(sys.argv[4]) if len(sys.argv) > 4 else 25
+VOCAB = 8192
+torch.set_num_threads(8)
+torch.manual_seed(1234)
+
+v = VARIANTS[NAME]
+cfg = SunnyConfig(vocab_size=VOCAB, dim=v["dim"], inner=v["inner"], rank=v["rank"],
+                  layers=v["layers"], h_max=2048.0)
+cfg.scan_chunk = 64
+m = SunnyNet(cfg).train()
+stack = m.num_params(non_embedding=True)
+opt = torch.optim.SGD(m.parameters(), lr=1e-4)
+x = torch.randint(0, VOCAB, (B, T))
+y = torch.randint(0, VOCAB, (B, T))
 
 
-def stack_params(dim, inner, rank, layers):
-    """meta device 实例化计数, 不手推公式 (漏项会到 30% 量级)."""
-    cfg = SunnyConfig(vocab_size=8, dim=dim, inner=inner, rank=rank,
-                      layers=layers, h_max=2048.0)
-    with torch.device("meta"):
-        m = SunnyNet(cfg)
-    return m.num_params(non_embedding=True)
+def step():
+    loss = torch.nn.functional.cross_entropy(m(x).reshape(-1, VOCAB), y.reshape(-1))
+    opt.zero_grad(set_to_none=True)
+    loss.backward()
+    opt.step()
+    return float(loss.detach())
 
 
-def configs():
-    out = {}
-    for dim in (80, 88, 96, 104, 112, 120, 128, 144):
-        for layers in (4, 5, 6, 7):
-            best = None
-            for rank in range(32, min(dim, 160) + 1, 8):
-                for inner in range(64, dim * 3 + 1, 8):
-                    n = stack_params(dim, inner, rank, layers)
-                    if n > TARGET * 1.35:
-                        break
-                    rel = abs(n - TARGET) / TARGET
-                    if best is None or rel < best[0]:
-                        best = (rel, n, inner, rank)
-            if best and best[0] < 0.03:
-                rel, n, inner, rank = best
-                tag = f"d{dim}_i{inner}_r{rank}_L{layers}"
-                out[tag] = dict(dim=dim, inner=inner, rank=rank, layers=layers,
-                                stack=n, rel=rel)
-    return out
+for _ in range(5):
+    lv = step()
+t0 = time.perf_counter()
+for _ in range(REPS):
+    lv = step()
+dt = (time.perf_counter() - t0) / REPS * 1e3
 
-
-CFG = configs()
-
-
-def build(tag, vocab):
-    c = CFG[tag]
-    return SunnyNet(SunnyConfig(vocab_size=vocab, dim=c["dim"], inner=c["inner"],
-                                rank=c["rank"], layers=c["layers"], h_max=2048.0))
-
-
-def bench(fn, reps=11, warm=3):
-    for _ in range(warm):
-        fn()
-    ts = []
-    for _ in range(reps):
-        t0 = time.perf_counter()
-        fn()
-        ts.append(time.perf_counter() - t0)
-    ts.sort()
-    return statistics.median(ts) * 1000, ts[0] * 1000
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["list", "bench", "train"])
-    ap.add_argument("tag", nargs="?")
-    ap.add_argument("a", nargs="?", type=int, default=1024)
-    ap.add_argument("b", nargs="?", type=int, default=8)
-    ap.add_argument("c", nargs="?", type=int, default=8)
-    ap.add_argument("d", nargs="?", type=int, default=1234)
-    args = ap.parse_args()
-
-    if args.cmd == "list":
-        print(f"{'tag':26s}{'stack':>10s}{'rel':>8s}  dim/inner/rank/L")
-        for t, c in sorted(CFG.items(), key=lambda kv: kv[1]["stack"]):
-            print(f"{t:26s}{c['stack']:>10,}{c['rel']*100:>7.2f}%  "
-                  f"{c['dim']}/{c['inner']}/{c['rank']}/{c['layers']}")
-        print(f"\n目标栈参数 {TARGET:,}; 共 {len(CFG)} 个候选")
-        return
-
-    torch.set_num_threads(args.c)
-    vocab = 8192
-    tag = args.tag or "d128_i192_r64_L4"
-    if tag == "base":
-        tag = "d128_i192_r64_L4"
-    torch.manual_seed(0)
-    m = build(tag, vocab)
-
-    if args.cmd == "bench":
-        T, B = args.a, args.b
-        x = torch.randint(0, vocab, (B, T))
-        y = torch.randint(0, vocab, (B, T))
-        opt = torch.optim.AdamW(m.parameters(), lr=1e-3)
-
-        def step():
-            lg = m(x)
-            loss = torch.nn.functional.cross_entropy(lg.reshape(-1, vocab), y.reshape(-1))
-            opt.zero_grad(set_to_none=True)
-            loss.backward()
-            opt.step()
-        step()
-        ms, mn = bench(step, reps=11, warm=3)
-        print("RESULT " + json.dumps({
-            "tag": tag, "stack": m.num_params(non_embedding=True),
-            "step_ms": round(ms, 2), "min_ms": round(mn, 2),
-            "T": T, "B": B, "threads": args.c,
-        }))
-        return
-
-    # train: 质量对照
-    steps, T, B, seed = args.a, args.b, args.c, args.d
-    torch.manual_seed(seed)
-    m = build(tag, vocab).train()
-    data = torch.randint(0, vocab, (B, T * 64))
-    opt = torch.optim.AdamW(m.parameters(), lr=3e-3, betas=(0.9, 0.95))
-    sched = torch.optim.lr_scheduler.OneCycleLR(
-        opt, max_lr=3e-3, total_steps=steps, pct_start=0.1)
-    best = float("inf")
-    for it in range(steps):
-        i = (it * T) % (data.shape[1] - T - 1)
-        xb = data[:, i:i + T]
-        yb = data[:, i + 1:i + T + 1]
-        lg = m(xb)
-        loss = torch.nn.functional.cross_entropy(lg.reshape(-1, vocab), yb.reshape(-1))
-        opt.zero_grad(set_to_none=True)
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(m.parameters(), 1.0)
-        opt.step()
-        sched.step()
-    with torch.no_grad():
-        i = 0
-        xb = data[:, i:i + T]
-        yb = data[:, i + 1:i + T + 1]
-        lg = m(xb)
-        val = torch.nn.functional.cross_entropy(
-            lg.reshape(-1, vocab), yb.reshape(-1)).item()
-    print("RESULT " + json.dumps({
-        "tag": tag, "steps": steps, "seed": seed,
-        "val_loss": round(val, 5), "ppl": round(math.exp(val), 2),
-        "stack": m.num_params(non_embedding=True),
-    }))
-
-
-if __name__ == "__main__":
-    main()
+out = {"name": NAME, "config": v, "T": T, "B": B, "stack": stack,
+       "train_ms": round(dt, 3), "ms_per_token": round(dt / (B * T) * 1e3, 5),
+       "loss": round(lv, 4)}
+print(f"[{NAME:16s}] stack={stack:,} train={out['train_ms']}ms "
+      f"ms/tok={out['ms_per_token']} loss={out['loss']}")
+print("RESULT " + json.dumps(out, ensure_ascii=False))

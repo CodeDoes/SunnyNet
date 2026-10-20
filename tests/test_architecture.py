@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -504,3 +505,69 @@ def test_ablation_switches_run(flags):
     for p in m.parameters():
         if p.grad is not None:
             assert torch.isfinite(p.grad).all()
+
+# ---------------------------------------------------------------- 等价改写
+def test_circ_folded_into_ws_matches_fp64():
+    """W_s(circ(x)) == x @ W_eff^T, 折叠必须与原路逐位接近 (fp64 1e-15)."""
+    torch.manual_seed(51)
+    cfg = SunnyConfig(vocab_size=256, dim=64, inner=96, rank=32, layers=2)
+    blk = SunnyNet(cfg).blocks[0].double()
+    x = torch.randn(3, 33, 64, dtype=torch.float64)
+    with torch.no_grad():
+        ref = blk.W_s(blk.circ(x))
+        folded = F.linear(x, blk._Ws_eff())
+    scale = ref.abs().max()
+    assert float((ref - folded).abs().max()) / float(scale) < 1e-12
+
+
+def test_folded_ws_used_in_forward_and_step():
+    """_emit 与 step 走折叠路径后, 仍须与未折叠的等效计算一致."""
+    torch.manual_seed(52)
+    cfg = SunnyConfig(vocab_size=256, dim=64, inner=96, rank=32, layers=2)
+    m = SunnyNet(cfg).double()
+    blk = m.blocks[0]
+    x = torch.randn(2, 40, 64, dtype=torch.float64)
+    s_in = torch.randn(2, 64, dtype=torch.float64)
+    hist = torch.zeros(2, cfg.taps - 1, 64, dtype=torch.float64)
+    out, s_T, _ = blk(x, s_in, hist)
+    u, gate, p = blk._core(blk._apply_local(blk.norm_in(x), hist))
+    states, _ = logspace_scan(u, p, s_in, chunk=40, p_min_hint=blk.p_min_bound)
+    y = blk._readout(u, None)
+    prev = torch.cat([s_in[:, None, :], states[:, :-1]], dim=1)
+    ref = blk.W_c(y) + blk.b_gain * states + blk.W_s(blk.circ(prev))
+    if blk.use_residual:
+        ref = ref + x
+    with torch.no_grad():
+        rel = float((out - ref).abs().max()) / float(ref.abs().max())
+    assert rel < 1e-11
+
+
+def test_wedge_constant_absorbed_by_norm():
+    """softwedge 去常数项后经 CenteredScaleNorm 与原始 softwedge 等价."""
+    torch.manual_seed(53)
+    norm = CenteredScaleNorm(64).double()
+    z = torch.randn(2, 32, 64, dtype=torch.float64) * 3
+    a = torch.tensor(0.5, dtype=torch.float64)
+    ref = norm(softwedge(z, a))
+    # c = a/2 常量, 中心化后被吸收
+    fast = norm(z + a * (0.5 + 0.5 * (z / (1.0 + z.abs()))) - a * 0.5)
+    with torch.no_grad():
+        rel = float((ref - fast).abs().max()) / float(ref.abs().max())
+    assert rel < 1e-12
+
+
+def test_apply_local_hist_zero_equals_padded():
+    """hist 全零时免 cat 路径与 prepend 路径逐位相等; 非零 hist 时必须走原路."""
+    torch.manual_seed(54)
+    from sunnynet.layers import DepthwiseCausal
+    dw = DepthwiseCausal(64, taps=4).double()
+    raw = torch.randn(2, 40, 64, dtype=torch.float64)
+    k = 3
+    hist0 = torch.zeros(2, k, 64, dtype=torch.float64)
+    rf = torch.cat([hist0, raw], dim=1)
+    padded = (rf + dw(rf))[:, k:]
+    fast = raw + dw(raw)
+    assert float((padded - fast).abs().max()) == 0.0
+    histn = torch.randn(2, k, 64, dtype=torch.float64)
+    rfn = torch.cat([histn, raw], dim=1)
+    assert float(((rfn + dw(rfn))[:, k:] - fast).abs().max()) > 1e-3

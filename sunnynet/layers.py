@@ -12,7 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .init import orthogonal_spectrum_
-from .ops import (CenteredScaleNorm, horizon_logit, logspace_scan, softwedge)
+from .ops import CenteredScaleNorm, horizon_logit, logspace_scan
 
 __all__ = ["StateCirculant", "DepthwiseCausal", "SunnyBlock", "SunnyState"]
 
@@ -150,12 +150,14 @@ class SunnyBlock(nn.Module):
         return w.reshape(B, T, D)
 
     def _apply_local(self, raw: torch.Tensor, hist: torch.Tensor) -> torch.Tensor:
-        """卷积历史 prepend 到序列前端."""
+        """卷积历史 prepend 到序列前端. hist 全零时免 cat (fp64 逐位相等)."""
         if self.dw is None:
             return raw
         k = self.taps - 1
-        rf = torch.cat([hist, raw], dim=1) if k else raw
-        return (rf + self.dw(rf))[:, k:]
+        if k and hist.abs().max().item() != 0.0:
+            rf = torch.cat([hist, raw], dim=1)
+            return (rf + self.dw(rf))[:, k:]
+        return raw + self.dw(raw)
 
     def _core(self, a: torch.Tensor):
         """扫描前的输入侧计算, 与滚动状态无关."""
@@ -169,25 +171,51 @@ class SunnyBlock(nn.Module):
             p = (1.0 - delta).expand_as(u)
         return u, gate, p.clamp(self.p_floor, 1.0)
 
+    def _prev(self, states: torch.Tensor, s_in: torch.Tensor) -> torch.Tensor:
+        """位置 0 用 s_in, 其余用前一步状态."""
+        return torch.cat([s_in[:, None, :], states[:, :-1]], dim=1)
+
     def _feedback(self, states: torch.Tensor, s_in: torch.Tensor) -> torch.Tensor:
         """状态反馈: f_t = circ(S_{t-1}), 位置 0 用 circ(s_in)."""
+        prev = self._prev(states, s_in)
         if self.circ is None:
-            return torch.cat([s_in[:, None, :], states[:, :-1]], dim=1)
-        prev = torch.cat([s_in[:, None, :], states[:, :-1]], dim=1)
+            return prev
         return self.circ(prev)
+
+    def _Ws_eff(self) -> torch.Tensor:
+        """把 circ 折进 W_s: W_s(circ(x)) == x @ W_eff^T (fp64 相对误差 1e-15).
+
+        circ 与 W_s 都只作用在特征维, 可交换为单次矩阵乘; 省掉整条 circ 路径.
+        """
+        W = self.W_s.weight
+        t0, t1, t2 = self.circ.t[0], self.circ.t[1], self.circ.t[2]
+        return t0 * torch.roll(W, -1, dims=1) + t1 * W + t2 * torch.roll(W, 1, dims=1)
 
     def _readout(self, u: torch.Tensor, s_prev: torch.Tensor):
         """输出侧非线性支路, 前向与单步共用."""
         if self.use_current:
-            return self.norm_mix(softwedge(self.W_z(u), self.a.tanh()))
+            return self.norm_mix(self._wedge(self.W_z(u)))
         return self.norm_mix(self.W_z(u))
+
+    def _wedge(self, z: torch.Tensor) -> torch.Tensor:
+        """softwedge 去掉常数项: z + a*s(z) = z*(1 + a/2/(1+|z|)) + a/2.
+
+        常数 a/2 在紧邻的 CenteredScaleNorm 中被中心化吸收 (fp64 相对误差 3e-16),
+        因此省一次最宽张量上的加法.
+        """
+        a = self.a.tanh()
+        return z * (1.0 + 0.5 * a / (1.0 + z.abs()))
 
     def _emit(self, u: torch.Tensor, states: torch.Tensor, s_in: torch.Tensor):
         y = self._readout(u, None)
         sn = self.norm_s(states) if self.norm_s is not None else states
-        core = self.W_c(y) + self.b_gain * sn + self.W_s(self._feedback(states, s_in))
+        prev = self._prev(states, s_in)
+        if self.circ is not None:
+            sfb = F.linear(prev, self._Ws_eff())
+        else:
+            sfb = self.W_s(prev)
+        core = self.W_c(y) + self.b_gain * sn + sfb
         if self.use_state_mul:
-            # 乘性读出: 局部支路与状态支路相乘 (H3 风格门控), 再与原加性读出相加
             core = core + self.W_g(y) * sn
         return core
 
@@ -231,10 +259,13 @@ class SunnyBlock(nn.Module):
         u_t, gate, p_t = self._core(a_t[:, None, :])
         u_t, gate, p_t = u_t[:, 0], gate[:, 0], p_t[:, 0]
         s_new = p_t * s + (1.0 - p_t) * u_t
-        prev = self.circ(s) if self.circ is not None else s
         y = self._readout(u_t[:, None, :], None)[:, 0]
         sn = self.norm_s(s_new[:, None, :])[:, 0] if self.norm_s is not None else s_new
-        out = self.W_c(y) + self.b_gain * sn + self.W_s(prev)
+        if self.circ is not None:
+            sfb = F.linear(s, self._Ws_eff())
+        else:
+            sfb = self.W_s(s)
+        out = self.W_c(y) + self.b_gain * sn + sfb
         if self.use_state_mul:
             out = out + self.W_g(y) * sn
         if self.use_residual:
