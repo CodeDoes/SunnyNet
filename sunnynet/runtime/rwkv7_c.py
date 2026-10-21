@@ -1,0 +1,109 @@
+"""C Runtime 的 RWKV-7 整模型绑定 (不依赖 torch)."""
+from __future__ import annotations
+
+import ctypes
+from pathlib import Path
+
+from . import BUILD, HERE, _find_gcc
+
+__all__ = ["SnRWKV7", "rwkv7_available"]
+
+DLL = BUILD / "sunnynet_rwkv7.dll"
+
+
+def rwkv7_available() -> bool:
+    return _find_gcc() is not None
+
+
+def _compile(gcc: str) -> None:
+    import subprocess
+    BUILD.mkdir(parents=True, exist_ok=True)
+    cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
+           "-funroll-loops", "-fopenmp", "-static", "-shared", "-std=c11",
+           str(HERE / "rwkv7.c"), "-o", str(DLL)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        raise RuntimeError(f"rwkv7 runtime 编译失败: {(r.stderr or r.stdout)[-800:]}")
+
+
+def _needs_rebuild() -> bool:
+    if not DLL.exists():
+        return True
+    t = DLL.stat().st_mtime
+    return any(s.stat().st_mtime > t
+               for s in (HERE / "rwkv7.c", HERE / "rwkv7.h"))
+
+
+_lib = None
+
+
+def _load():
+    global _lib
+    if _lib is not None:
+        return _lib
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError("未找到 C 编译器 (设 SUNNY_W64)")
+    if _needs_rebuild():
+        _compile(gcc)
+    lib = ctypes.CDLL(str(DLL))
+    V, I, P = ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p
+    lib.sn_rk_load.restype = V
+    lib.sn_rk_load.argtypes = [P]
+    lib.sn_rk_free.argtypes = [V]
+    lib.sn_rk_reset.argtypes = [V]
+    lib.sn_rk_step.argtypes = [V, I, V]
+    lib.sn_rk_prefill.argtypes = [V, V, I, V]
+    lib.sn_rk_dbg.argtypes = [V, I, I, V]
+    lib.sn_rk_vocab.argtypes = [V]
+    lib.sn_rk_vocab.restype = I
+    lib.sn_rk_ready.argtypes = [V]
+    lib.sn_rk_ready.restype = I
+    _lib = lib
+    return lib
+
+
+class SnRWKV7:
+    """B=1 单序列 RWKV-7 解码句柄. logits 复用同一缓冲."""
+
+    def __init__(self, path, vocab: int):
+        self._lib = _load()
+        self._logits = (ctypes.c_float * vocab)()
+        self._h = self._lib.sn_rk_load(str(path).encode())
+        if not self._h:
+            raise RuntimeError(f"sn_rk_load 失败: {path}")
+        if not self._lib.sn_rk_ready(self._h):
+            raise RuntimeError("sn_rk_load 返回但模型非就绪")
+        self.vocab = vocab
+
+    def reset(self):
+        self._lib.sn_rk_reset(self._h)
+
+    def step(self, token: int) -> list[float]:
+        self._lib.sn_rk_step(self._h, int(token), ctypes.byref(self._logits))
+        return list(self._logits)
+
+    def step_raw(self, token: int) -> None:
+        """只推进状态, 不把 logits 拷成 Python list (计时用)."""
+        self._lib.sn_rk_step(self._h, int(token), ctypes.byref(self._logits))
+
+    def logits(self) -> list[float]:
+        return list(self._logits)
+
+    def prefill(self, tokens) -> list[float]:
+        toks = list(tokens)
+        buf = (ctypes.c_int * len(toks))(*toks)
+        self._lib.sn_rk_prefill(self._h, buf, len(toks), ctypes.byref(self._logits))
+        return list(self._logits)
+
+    def dbg(self, token: int, layer: int, dim: int) -> list[float]:
+        buf = (ctypes.c_float * (9 * dim))()
+        self._lib.sn_rk_dbg(self._h, int(token), int(layer), ctypes.byref(buf))
+        return list(buf)
+
+    def __del__(self):
+        try:
+            if getattr(self, "_h", None):
+                self._lib.sn_rk_free(self._h)
+        except Exception:
+            pass

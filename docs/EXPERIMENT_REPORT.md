@@ -2360,6 +2360,48 @@ def fibonacci(n):
   写成先衰减再算去除项，会在 step0（S=0）逐位正确、step1 起偏差 0.5+，极易漏过。
 - LoRA 分解方向：`x @ W1 @ W2`，不是 `W1 @ W2 @ x`。
 
+### 24.10 RWKV-7 的整模型 C 内核
+
+§24.9 的 numpy 路径只用于验证权重正确性，解码约 388 ms/step。本节的把 RWKV-7 的
+**整个单步前向**搬进 C（`sunnynet/runtime/rwkv7.c`，A 步一次调用）：嵌入查表、
+逐层 norm、time-mix（`r/k/v/o` 投影 + `w/a/v/g` 四组 LoRA + `tanh`/`sigmoid`）、
+逐 head 矩阵状态递推（含 rank-1 校正）、group-norm、`r_k` 项、channel-mix、
+终态归一、LM head。权重由 `experiments/_export_rwkv7.py` 从 GGUF 导出为打包 fp32
+blob（矩阵存 `(in, out)` 配合 GEMV；各层 v-LoRA 秩不同，逐层在头部记秩表）。
+
+**（1）数值一致性**（`experiments/_rwkv7_c_equiv.py`，与 `rwkv7.py` 的 numpy 参考逐步比对）
+
+| 口径 | 结果 |
+|---|---|
+| 单步 logits max\|diff\| | 7.25e-05 |
+| argmax 一致 | 12 / 12 |
+| 120 步长程 argmax 一致 | 120 / 120 |
+
+**（2）解码速度**（`experiments/_rwkv7_c_bench.py`，单序列、已建状态后单步、
+每格独立子进程、5 轮交错、60 步取中位）
+
+| 实现 | ms/step | 相对 numpy | 逐轮占优 |
+|---|---|---|---|
+| numpy 参考 | 366.36 | 1.00× | — |
+| C 内核 1 线程 | 67.92 | 5.39× | 5/5 |
+| C 内核 4 线程 | 52.26 | 7.01× | 5/5 |
+| C 内核 8 线程 | 48.88 | 7.49× | 5/5 |
+
+C 内核 8 线程对 1 线程再快 1.39×（5/5）。**边界**：单线程单格绝对耗时方差大
+（50–84 ms），随机器负载浮动，比值与逐轮符号检验方向一致；只测单序列单线程口径，
+未测批量。GEMV 的列分块并行不改每列求和顺序，8 线程与 1 线程逐位一致。
+
+**（3）开发中定位的 bug**
+- 权重布局与 C 侧不一致：导出器判 LoRA 张量时用 `name.split(".")[-1]`，取到 `"weight"`
+  而非模块名，导致 8 个 LoRA 矩阵未转置、`w1@w2` 维度塌成 `(64,64)`。逐张量 float
+  计数对不上（差 21,120,000）时暴露。
+- `w` 的 LoRA 中间夹 `tanh`（`exp(-σ(tanh(xw W1) W2 + w0)/√e)`），**不可折叠成单矩阵**；
+  `a`/`v` 无夹层但为统一起见保留分解。
+
+**（4）CLI**
+`--gguf-backend c` 走 C 内核（`sunnynet/cli.py` `_main_gguf_c`），需先运行
+`experiments/_export_rwkv7.py` 导出 blob。
+
 ---
 
 ## 25. 完整复现
@@ -2415,6 +2457,28 @@ python -X utf8 experiments/_decode_batch.py 256 1,4,8,16,32 3
 python -X utf8 experiments/_decode_dim.py 256 3              # §22.5 dim 扫描
 python -X utf8 experiments/_decode_longpath.py 256,512,1024,2048,4096 2  # §22.10 单步 vs 上下文
 ```
+
+### 通用递推 Runtime（§24，需 C 编译器）
+
+```bash
+export SUNNY_W64=F:/devtools/w64devkit
+python -X utf8 experiments/_recur_equiv.py                   # §24.3 内核自检
+python -X utf8 experiments/_unified_ir_map.py                # §24.2 跨架构映射
+python -X utf8 experiments/_runtime_bench.py                 # §24.4 对向量化基线
+python -X utf8 experiments/_state_quant.py                   # §24.5 状态量化动态范围
+python -X utf8 experiments/_export_runtime.py \
+    experiments/ckpts_ood/sunnynet.pt experiments/ckpts_ood/sunnynet.runtime.bin
+python -X utf8 experiments/_runtime_model_equiv.py           # §24.7 C vs torch
+python -X utf8 experiments/_runtime_decode.py 256,1024,2048 3  # §24.7 解码延迟
+python -X utf8 experiments/_rwkv7_gguf_equiv.py              # §24.9 GGUF vs .pth
+python -X utf8 experiments/_rwkv7_gguf_bench.py              # §24.9 numpy 生成
+python -X utf8 experiments/_export_rwkv7.py                  # §24.10 导出 C blob (需 GGUF)
+python -X utf8 experiments/_rwkv7_c_equiv.py 12              # §24.10 C vs numpy
+python -X utf8 experiments/_rwkv7_c_bench.py 5               # §24.10 C 内核速度
+python -X utf8 -m pytest tests/test_rwkv7_c.py -v
+```
+
+> GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。
 
 > **进程隔离要求**：耗时测量必须每格一个子进程（`experiments/on_scaling.py` 已内建），
 > 否则同进程内累积的模型构建会使读数偏高至 2 倍以上，见 §2.4。

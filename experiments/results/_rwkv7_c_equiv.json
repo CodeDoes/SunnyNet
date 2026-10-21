@@ -1,0 +1,50 @@
+{
+  "prompt_tokens": 12,
+  "steps": 6,
+  "max_abs_diff": 5.1266321072773735e-05,
+  "argmax_agree": "6/6",
+  "rows": [
+    {
+      "step": 0,
+      "max_abs_diff": 4.293678800948442e-05,
+      "argmax_ref": 46,
+      "argmax_c": 46,
+      "agree": true
+    },
+    {
+      "step": 1,
+      "max_abs_diff": 2.0387297290369588e-05,
+      "argmax_ref": 22590,
+      "argmax_c": 22590,
+      "agree": true
+    },
+    {
+      "step": 2,
+      "max_abs_diff": 3.992761584825644e-05,
+      "argmax_ref": 47014,
+      "argmax_c": 47014,
+      "agree": true
+    },
+    {
+      "step": 3,
+      "max_abs_diff": 5.1266321072773735e-05,
+      "argmax_ref": 32321,
+      "argmax_c": 32321,
+      "agree": true
+    },
+    {
+      "step": 4,
+      "max_abs_diff": 3.724695448070747e-05,
+      "argmax_ref": 45,
+      "argmax_c": 45,
+      "agree": true
+    },
+    {
+      "step": 5,
+      "max_abs_diff": 2.1719520514551505e-05,
+      "argmax_ref": 22590,
+      "argmax_c": 22590,
+      "agree": true
+    }
+  ]
+}

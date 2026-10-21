@@ -138,6 +138,72 @@ def _main_gguf(args) -> int:
     return 0
 
 
+def _main_gguf_c(args) -> int:
+    """GGUF 权重走 C 内核整模型单步 (RWKV-7)."""
+    import numpy as np
+    from .runtime.rwkv7 import RWKV7
+    from .runtime.rwkv7_c import SnRWKV7
+
+    blob = Path(args.blob) if args.blob else Path(args.gguf).with_suffix(".runtime.bin")
+    if not blob.exists():
+        raise SystemExit(f"缺少权重 blob: {blob}\n先运行: python -X utf8 "
+                         f"experiments/_export_rwkv7.py {args.gguf} {blob}")
+    t0 = time.perf_counter()
+    tk = RWKV7(args.gguf)
+    m = SnRWKV7(blob, tk.vocab)
+    load_s = time.perf_counter() - t0
+
+    ids = tk.tok.encode(args.prompt)
+    t0 = time.perf_counter()
+    logits = np.array(m.prefill(ids), dtype=np.float32)
+    prefill_s = time.perf_counter() - t0
+    out = list(ids)
+    step_times = []
+    for _ in range(args.max_new):
+        nxt = int(np.argmax(logits)) if args.temperature <= 0 else \
+            _sample_np(logits, args.temperature, args.top_k)
+        out.append(nxt)
+        if len(out) > args.max_new + len(ids):
+            break
+        t0 = time.perf_counter()
+        logits = np.array(m.step(nxt), dtype=np.float32)
+        step_times.append(time.perf_counter() - t0)
+    text = tk.tok.decode(out)
+    st = {
+        "backend": "gguf/rwkv7/c",
+        "load_ms": load_s * 1e3,
+        "prefill_tokens": len(ids),
+        "prefill_ms": prefill_s * 1e3,
+        "gen_tokens": len(step_times),
+        "decode_ms_per_token": (sum(step_times) / len(step_times) * 1e3
+                                if step_times else 0.0),
+    }
+    if args.json:
+        print(json.dumps({"prompt": args.prompt, "text": text,
+                          "arch": "rwkv7", "stats": st}, ensure_ascii=False, indent=2))
+    else:
+        sys.stdout.write(text)
+        print()
+        if args.stats:
+            print(f"[rwkv7 backend gguf/c]")
+            print(f"[load {st['load_ms']:.1f} ms; prefill {st['prefill_tokens']} tok "
+                  f"{st['prefill_ms']:.1f} ms; decode {st['gen_tokens']} tok "
+                  f"{st['decode_ms_per_token']:.2f} ms/tok (C 内核)]")
+    return 0
+
+
+def _sample_np(logits, temperature: float, top_k: int) -> int:
+    import numpy as np
+    z = logits.astype(np.float64) / temperature
+    if top_k and top_k < z.size:
+        thr = np.partition(z, -top_k)[-top_k]
+        z = np.where(z < thr, -np.inf, z)
+    z -= z.max()
+    p = np.exp(z)
+    p /= p.sum()
+    return int(np.random.default_rng().choice(z.size, p=p))
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="sunnynet-cli",
                                  description="SunnyNet CPU 推理")
@@ -154,12 +220,16 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=0, help="0 = 不限制")
     ap.add_argument("--backend", choices=["torch", "c"], default="torch",
                     help="c = 纯 C 整模型单步 (需先导出 .runtime.bin)")
+    ap.add_argument("--gguf-backend", choices=["numpy", "c"], default="numpy",
+                    help="--gguf 时的执行后端; c = C 内核整模型单步")
     ap.add_argument("--blob", default=None, help="--backend c 的权重 blob 路径")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     args = ap.parse_args(argv)
 
     if args.gguf:
+        if args.gguf_backend == "c":
+            return _main_gguf_c(args)
         return _main_gguf(args)
     if not args.ckpt:
         raise SystemExit("需要 --ckpt 或 --gguf")

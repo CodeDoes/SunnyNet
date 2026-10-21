@@ -466,14 +466,51 @@ def fibonacci(n):
 -> \n    if n < 2:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)
 ```
 
-**口径边界**：`rwkv7.py` 目前是 **numpy 参考路径**，不是 C 内核。它证明的是
-"Runtime 能读外部 GGUF 权重并算对"，解码约 388 ms/step——**这个数字不作速度成果陈述**。
-把 RWKV-7 的递推搬进 C 内核（复用 `recur.c` 的向量化骨架）是下一步。
+**口径边界**：numpy 路径证明的是"Runtime 能读外部 GGUF 权重并算对"，
+解码约 388 ms/step——**这个数字不作速度成果陈述**。RWKV-7 的递推已搬进 C 内核（见下节）。
 
 一条与既有叙事的差异必须记录：RWKV-7 的状态是**逐 head 的矩阵**
 `S ∈ R^{64×64}`，更新为 `S_t = S_{t-1}⊙w_t − (S_{t-1}k_t)k_tᵀ + v_t k_tᵀ`，
 含 rank-1 去除项——**不是**元素级 `s = a⊙s + b`。统一 Runtime 若要覆盖它，
 IR 需要在元素级递推之外补一个矩阵值递推（外积 / rank-1 校正）层级。
+
+### RWKV-7 的 C 内核（`sunnynet/runtime/rwkv7.c`）
+
+把整模型单步搬进 C：嵌入查表、逐层 norm / time-mix（含 LoRA 与 `tanh` / `sigmoid`）、
+逐 head 矩阵状态递推（rank-1 校正）、group-norm、channel-mix、终态归一、LM head
+全部在 C 内完成，一步一次调用。权重由 `experiments/_export_rwkv7.py` 从 GGUF 导出为
+打包 fp32 blob，矩阵存 `(in, out)` 配合 GEMV。
+
+数值一致性（`experiments/_rwkv7_c_equiv.py`，与 numpy 参考逐步比对）：
+
+| 口径 | 结果 |
+|---|---|
+| 单步 logits max\|diff\| | 7.25e-05（bf16 精度内） |
+| argmax 一致 | 12 / 12 |
+| 120 步长程 argmax 一致 | 120 / 120 |
+
+解码速度（`experiments/_rwkv7_c_bench.py`，单序列、已建状态后单步、每格独立子进程、
+5 轮交错、60 步取中位）：
+
+| 实现 | ms/step | 相对 numpy |
+|---|---|---|
+| numpy 参考 | 366.36 | 1.00× |
+| C 内核 1 线程 | 67.92 | 5.39×（5/5 逐轮占优） |
+| C 内核 4 线程 | 52.26 | 7.01× |
+| C 内核 8 线程 | 48.88 | 7.49× |
+
+C 内核 8 线程对 1 线程再快 1.39×（5/5 逐轮占优）。单线程方差偏大（50–84 ms），
+绝对值随机器负载浮动，比值与逐轮符号检验一致。
+
+CLI：`--gguf-backend c` 走 C 内核（需先运行 `_export_rwkv7.py` 导出 blob）：
+
+```bash
+python -X utf8 experiments/_export_rwkv7.py \
+    experiments/gguf/rwkv7-191M-world-bf16.gguf \
+    experiments/gguf/rwkv7-191M-world-bf16.runtime.bin
+python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
+    --gguf-backend c --prompt "The Eiffel Tower is located in" --max-new 40 --stats
+```
 
 ### 命令行
 
@@ -497,14 +534,14 @@ python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
 
 现有资产：原创架构、AVX2 融合内核（训练步 1.10–1.17×）、通用递推 C Runtime
 （对向量化基线中位 9.9×）、**C 整模型单步解码（B=1 单线程 1.53–2.05×）**、
-跨架构映射验证、**GGUF 只读 + RWKV-7 权重跑通（数值与官方 .pth 等价）**。
+跨架构映射验证、**GGUF 只读 + RWKV-7 权重跑通（数值与官方 .pth 等价）**、
+**RWKV-7 整模型 C 内核（对 numpy 5.39×，8 线程 7.49×）**。
 
-近期补齐：RWKV-7 递推的 C 内核（把 388 ms/step 的 numpy 路径换成向量化单步）、
-INT8 权重量化、更大批量的 C 解码（多序列共享权重读取）。
+近期：INT4 权重量化、pip 发布（v0.1.0）、C API 稳定 ABI。
 
-中期：把内核从 SunnyNet 定制扩展为任意 `s_t = a_t*s_{t-1} + b_t` 的通用单步/批量扫描，
-并补矩阵值递推（外积 / rank-1 校正）覆盖 RWKV-7、DeltaNet 这类；补 AVX-512 与 NEON
-后端；OpenAI 兼容 HTTP 服务。
+中期：补矩阵值递推（外积 / rank-1 校正）覆盖 RWKV-7、DeltaNet、GLA 这类
+（IR 已支持，缺模型加载与权重转换）；AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务；
+接入 Ollama / LM Studio。
 
 不做的：复刻 llama.cpp 的通用张量算子层（GGML 为 Transformer 设计，逐算子调度）；
 打平 Transformers / vLLM（分别为模型仓库与 GPU 服务赛道）。
