@@ -1,0 +1,36 @@
+{
+  "model": "rwkv7-191M-world-bf16",
+  "params_label": "191M",
+  "n_layer": 12,
+  "n_embd": 768,
+  "head_size": 64,
+  "vocab": 65536,
+  "load_seconds": 3.367189199954737,
+  "decode_ms_median": 388.63750000018626,
+  "decode_ms_min": 351.4050000230782,
+  "decode_ms_mean": 395.6293883335699,
+  "engine": "numpy 参考路径 (非 C 内核)",
+  "note": "单序列单线程; 状态每步 O(1) 与上下文无关",
+  "samples": [
+    {
+      "tag": "en",
+      "prompt": "The Eiffel Tower is located in the city of",
+      "output": "The Eiffel Tower is located in the city of Paris, France. The Eiffel Tower was designed by Gustave Eiffel in 1887 as a monument to"
+    },
+    {
+      "tag": "en",
+      "prompt": "Water is composed of hydrogen and",
+      "output": "Water is composed of hydrogen and oxygen.\nThe hydrogen gas is the first component of a fuel cell. The hydrogen and oxygen atoms combine to create a"
+    },
+    {
+      "tag": "zh",
+      "prompt": "中国的首都是",
+      "output": "中国的首都是在大名府，而大名府的四个名称都是位于北京的大都会"
+    },
+    {
+      "tag": "code",
+      "prompt": "def fibonacci(n):\n    if n < 2:\n        return n\n    return",
+      "output": "def fibonacci(n):\n    if n < 2:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)\n\ndef fibonacci_tree(n,"
+    }
+  ]
+}

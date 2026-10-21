@@ -69,6 +69,8 @@ The whole decode step — embedding lookup, per-layer norm, depthwise conv histo
 
 CLI: `python -m sunnynet.cli --ckpt runs/small.pt --prompt "..."` (`--backend c` for the pure-C decode path).
 
+Foreign weights: `sunnynet/runtime/gguf.py` reads GGUF and `rwkv7.py` runs RWKV-7 per token without PyTorch. Dequantized tensors are bit-identical to the official `.pth` (max diff 0), and per-token logits match an independent reference implementation to 4.79e-06 (argmax 12/12). The official RWKV-7 191M model generates coherent text (English, Chinese, and Python all verified). This path is numpy, not C — it demonstrates that the runtime consumes external weights correctly, and its ~388 ms/step is not a speed result. RWKV-7's state is a per-head matrix with a rank-1 removal term, so a matrix-valued recurrence layer is needed in the IR beyond the elementwise forms above.
+
 ---
 
 ## 中文简介
@@ -440,6 +442,39 @@ torch 4.56 ms/tok（24 token 单次读数，未做多轮），差距被线程调
 固定标度下的相对误差相差 12.5×。
 边界：只测第 0 层、单 ckpt（1.4M）、单条随机序列，不做端到端 ppl 对照。
 
+### GGUF 只读（`sunnynet/runtime/gguf.py` + `rwkv7.py`）
+
+读入外部 GGUF 权重并逐 token 自回归生成，不经 PyTorch。首个打通的模型是官方
+RWKV-7 191M（`BlinkDL/rwkv-7-world` 的 `.pth` 经 llama.cpp 转 GGUF，bf16）。
+张量命名与递推形式取自 llama.cpp 的 `src/models/rwkv7*.cpp`；参考数学取自
+BlinkDL/RWKV-LM 的 `RWKV-v7/rwkv_v7_numpy.py`。
+
+数值验证（`experiments/_rwkv7_gguf_equiv.py`）：GGUF 反量化结果与官方 `.pth`
+**逐位一致**（`max|diff| = 0`）；逐 token 单步 logits 与独立参考实现：
+
+| 口径 | 结果 |
+|---|---|
+| 单步 logits max\|diff\| | 4.79e-06（bf16 精度内） |
+| argmax 一致 | 12 / 12 |
+
+生成样例（`experiments/_rwkv7_gguf_bench.py`，温度 0.7 / top-k 20 / seed 42）：
+
+```
+The Eiffel Tower is located in the city of
+-> Paris, France. The Eiffel Tower was designed by Gustave Eiffel in 1887 as a monument to
+def fibonacci(n):
+-> \n    if n < 2:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)
+```
+
+**口径边界**：`rwkv7.py` 目前是 **numpy 参考路径**，不是 C 内核。它证明的是
+"Runtime 能读外部 GGUF 权重并算对"，解码约 388 ms/step——**这个数字不作速度成果陈述**。
+把 RWKV-7 的递推搬进 C 内核（复用 `recur.c` 的向量化骨架）是下一步。
+
+一条与既有叙事的差异必须记录：RWKV-7 的状态是**逐 head 的矩阵**
+`S ∈ R^{64×64}`，更新为 `S_t = S_{t-1}⊙w_t − (S_{t-1}k_t)k_tᵀ + v_t k_tᵀ`，
+含 rank-1 去除项——**不是**元素级 `s = a⊙s + b`。统一 Runtime 若要覆盖它，
+IR 需要在元素级递推之外补一个矩阵值递推（外积 / rank-1 校正）层级。
+
 ### 命令行
 
 ```bash
@@ -452,19 +487,24 @@ python -X utf8 experiments/_export_runtime.py \
     experiments/ckpts_ood/sunnynet.pt experiments/ckpts_ood/sunnynet.runtime.bin
 python -m sunnynet.cli --ckpt experiments/ckpts_ood/sunnynet.pt \
     --backend c --prompt "子曰：" --max-new 80 --stats
+
+# 外部 GGUF 权重 (RWKV-7)
+python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
+    --prompt "The Eiffel Tower is located in the city of" --max-new 40
 ```
 
 ### 路线
 
 现有资产：原创架构、AVX2 融合内核（训练步 1.10–1.17×）、通用递推 C Runtime
 （对向量化基线中位 9.9×）、**C 整模型单步解码（B=1 单线程 1.53–2.05×）**、
-跨架构映射验证。
+跨架构映射验证、**GGUF 只读 + RWKV-7 权重跑通（数值与官方 .pth 等价）**。
 
-近期补齐：权重格式转换（GGUF 只读，先读 RWKV-7）、INT8 权重量化、
-更大批量的 C 解码（多序列共享权重读取）。
+近期补齐：RWKV-7 递推的 C 内核（把 388 ms/step 的 numpy 路径换成向量化单步）、
+INT8 权重量化、更大批量的 C 解码（多序列共享权重读取）。
 
-中期：把内核从 SunnyNet 定制扩展为任意 `s_t = a_t*s_{t-1} + b_t` 的通用单步/批量扫描；
-补 AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务。
+中期：把内核从 SunnyNet 定制扩展为任意 `s_t = a_t*s_{t-1} + b_t` 的通用单步/批量扫描，
+并补矩阵值递推（外积 / rank-1 校正）覆盖 RWKV-7、DeltaNet 这类；补 AVX-512 与 NEON
+后端；OpenAI 兼容 HTTP 服务。
 
 不做的：复刻 llama.cpp 的通用张量算子层（GGML 为 Transformer 设计，逐算子调度）；
 打平 Transformers / vLLM（分别为模型仓库与 GPU 服务赛道）。
@@ -482,11 +522,14 @@ sunnynet/
   linear_baselines.py  O(N) 同复杂度对照: 线性注意力 / RWKV / Mamba / Hyena / H3
   model.py        SunnyNet 主体 (状态 (B,L,D), 逐层接力)
   init.py         谱锚定初始化
-  cli.py          命令行推理 (加载 ckpt -> 分词器 -> 自回归解码, --backend torch/c)
+  cli.py          命令行推理 (加载 ckpt -> 分词器 -> 自回归解码, --backend torch/c;
+                  --gguf 走外部 RWKV-7 权重)
   runtime/        独立 C 推理 Runtime
     recur.c         通用一阶递推内核 (扫描 / 反向 / 单步 / INT8 量化)
     sunnynet.c      整模型单步解码 (B=1, 无中间张量)
     model.py        ctypes 绑定
+    gguf.py         GGUF 只读加载 (f16/bf16/f32 + 量化反量化)
+    rwkv7.py        RWKV-7 单步递推 (numpy 参考路径, 读 GGUF 权重)
   baseline.py     同参数量 Transformer 对照 (仅用于对照, 非架构本体)
   tokenizer.py    从零实现的 BPE 分词器
   profiling.py    真实性能探针 (峰值内存 / 访存 / 吞吐)
@@ -503,6 +546,7 @@ experiments/
 tests/
   test_architecture.py  架构自检 (分块一致性 / 因果性 / 梯度界 / 深度稳定, 63 项)
   test_runtime_model.py C 整模型解码一致性
+  test_rwkv7_gguf.py    GGUF 加载 / 张量对齐 / RWKV-7 递推等价 / 分词往返
   test_smoke_pipeline.py 端到端冒烟 (合成语料 -> 训练 -> 评估)
 prepare_data.py   真实语料采集
 build_corpus.py   分词器训练 + token 流构建

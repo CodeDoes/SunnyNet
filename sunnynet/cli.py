@@ -106,10 +106,44 @@ def decode_stream(model, tk, prompt: str, max_new: int = 80,
     decode_stream.state = None
 
 
+def _main_gguf(args) -> int:
+    """外部 GGUF 权重路径 (RWKV-7), 不经 PyTorch."""
+    from .runtime.rwkv7 import RWKV7
+    t0 = time.perf_counter()
+    m = RWKV7(args.gguf)
+    load_s = time.perf_counter() - t0
+    t0 = time.perf_counter()
+    text, ids = m.generate(args.prompt, max_new=args.max_new,
+                           temperature=args.temperature, top_k=args.top_k,
+                           seed=args.seed)
+    gen_s = time.perf_counter() - t0
+    st = {
+        "backend": "gguf/rwkv7",
+        "load_ms": load_s * 1e3,
+        "gen_tokens": len(ids),
+        "decode_ms_per_token": gen_s / max(len(ids), 1) * 1e3,
+    }
+    if args.json:
+        print(json.dumps({"prompt": args.prompt, "text": text,
+                          "arch": "rwkv7", "dim": m.n_embd, "layers": m.n_layer,
+                          "stats": st}, ensure_ascii=False, indent=2))
+    else:
+        sys.stdout.write(text)
+        print()
+        if args.stats:
+            print(f"[rwkv7 {m.n_layer}L d{m.n_embd} vocab {m.vocab} "
+                  f"backend gguf/numpy]")
+            print(f"[load {st['load_ms']:.1f} ms; {st['gen_tokens']} tok "
+                  f"{st['decode_ms_per_token']:.2f} ms/tok (numpy 路径)]")
+    return 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="sunnynet-cli",
                                  description="SunnyNet CPU 推理")
-    ap.add_argument("--ckpt", required=True, help="checkpoint 路径")
+    ap.add_argument("--ckpt", default=None, help="SunnyNet checkpoint 路径")
+    ap.add_argument("--gguf", default=None,
+                    help="外部 GGUF 权重路径 (目前支持 RWKV-7), 与 --ckpt 二选一")
     ap.add_argument("--prompt", default="", help="提示词")
     ap.add_argument("--max-new", type=int, default=80)
     ap.add_argument("--temperature", type=float, default=0.8)
@@ -124,6 +158,11 @@ def main(argv=None):
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     args = ap.parse_args(argv)
+
+    if args.gguf:
+        return _main_gguf(args)
+    if not args.ckpt:
+        raise SystemExit("需要 --ckpt 或 --gguf")
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)

@@ -2315,6 +2315,50 @@ Windows 路径打不开权重文件；C 侧改用 `_wfopen` + `MultiByteToWideCh
 `sunnynet/cli.py`，`python -m sunnynet.cli --ckpt <path> --prompt "..."`。
 加载 ckpt → 分词器 → 自回归解码，`--stats` 输出 prefill/decode 耗时。
 `--backend c` 走整模型 C 解码（需先用 `experiments/_export_runtime.py` 导出 blob）。
+`--gguf <path>` 走外部 GGUF 权重（见 24.9）。
+
+### 24.9 GGUF 只读与外部权重（RWKV-7）
+
+`--gguf` 路径读入外部 GGUF 权重并逐 token 生成，不经 PyTorch。首个打通的是官方
+RWKV-7 191M（BlinkDL/rwkv-7-world 的 `.pth` 经 llama.cpp 转 GGUF，bf16）。
+张量命名与递推形式取自 llama.cpp 的 `src/models/rwkv7*.cpp`；参考数学取自
+BlinkDL/RWKV-LM 的 `RWKV-v7/rwkv_v7_numpy.py`。
+
+**（1）权重对齐**（`experiments/_gguf_align.py`）
+GGUF 反量化结果与官方 `.pth` 逐张量比对，全部 `max|diff| = 0`（bf16 无损还原）。
+LoRA 分解矩阵（w1/w2、a1/a2、g1/g2、v1/v2）在 GGUF 里存为 `(out, in)`，与 `.pth`
+相反，其余矩阵同向。词表以 `\xNN` 转义字面量存字符串，需反转义为字节。
+
+**（2）数值等价**（`experiments/_rwkv7_gguf_equiv.py`）
+GGUF 驱动的实现与官方 `.pth` 的独立参考实现，逐 token 单步 logits 比对：
+
+| 口径 | 结果 |
+|---|---|
+| 单步 logits max\|diff\| | 4.79e-06 |
+| argmax 一致 | 12 / 12 |
+
+**（3）生成**（`experiments/_rwkv7_gguf_bench.py`，温度 0.7 / top-k 20 / seed 42）
+英文事实续写、中文续写、Python 代码补全均通顺：
+
+```
+The Eiffel Tower is located in the city of
+-> Paris, France. The Eiffel Tower was designed by Gustave Eiffel in 1887 as a monument to
+def fibonacci(n):
+-> \n    if n < 2:\n        return n\n    return fibonacci(n - 1) + fibonacci(n - 2)
+```
+
+**（4）必须记录的两条边界**
+- `rwkv7.py` 是 **numpy 参考路径**，不是 C 内核。它证明"Runtime 能读外部 GGUF 并算对"，
+  解码约 388 ms/step——**这个数字不作速度成果陈述**。
+- RWKV-7 的状态是**逐 head 的矩阵** `S ∈ R^{64×64}`，更新为
+  `S_t = S_{t-1}⊙w_t − (S_{t-1}k_t)k_tᵀ + v_t k_tᵀ`，含 rank-1 去除项，
+  **不是**元素级 `s = a⊙s + b`（24.1 的两种形式）。统一 IR 要覆盖它，需在元素级之外
+  补矩阵值递推（外积 / rank-1 校正）层级。这是一条对既有"两种形式统一"叙事的修正。
+
+**（5）开发中定位的 bug**
+- rank-1 去除项必须用**未衰减**的 `S`：`S⊙w − (S k)kᵀ + v kᵀ` 里两项共用同一个 `S`。
+  写成先衰减再算去除项，会在 step0（S=0）逐位正确、step1 起偏差 0.5+，极易漏过。
+- LoRA 分解方向：`x @ W1 @ W2`，不是 `W1 @ W2 @ x`。
 
 ---
 
