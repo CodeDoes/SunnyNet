@@ -1,0 +1,50 @@
+[
+  {
+    "kernel": 0,
+    "threads": 1,
+    "T": 256,
+    "ms_per_step": 3.1303433332747472
+  },
+  {
+    "kernel": 1,
+    "threads": 1,
+    "T": 256,
+    "ms_per_step": 3.058699999625484
+  },
+  {
+    "kernel": 0,
+    "threads": 1,
+    "T": 1024,
+    "ms_per_step": 3.0463733341700086
+  },
+  {
+    "kernel": 1,
+    "threads": 1,
+    "T": 1024,
+    "ms_per_step": 2.8415966662578285
+  },
+  {
+    "kernel": 0,
+    "threads": 8,
+    "T": 256,
+    "ms_per_step": 4.306713332577298
+  },
+  {
+    "kernel": 1,
+    "threads": 8,
+    "T": 256,
+    "ms_per_step": 4.800806666025892
+  },
+  {
+    "kernel": 0,
+    "threads": 8,
+    "T": 1024,
+    "ms_per_step": 4.108340000190462
+  },
+  {
+    "kernel": 1,
+    "threads": 8,
+    "T": 1024,
+    "ms_per_step": 3.8294866661696387
+  }
+]
