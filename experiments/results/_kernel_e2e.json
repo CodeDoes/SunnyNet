@@ -1,0 +1,9 @@
+{
+  "T": 256,
+  "threads": 8,
+  "rounds": 4,
+  "median_step_ms": {
+    "torch": 297.71,
+    "kernel": 284.81
+  }
+}

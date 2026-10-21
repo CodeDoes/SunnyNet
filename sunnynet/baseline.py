@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-__all__ = ["BaselineConfig", "TransformerLM", "solve_baseline_for_params"]
+__all__ = ["BaselineConfig", "TransformerLM", "TransformerState", "solve_baseline_for_params"]
 
 
 @dataclass
@@ -24,6 +24,14 @@ class BaselineConfig:
     d_ff: int = 640
     max_len: int = 2048
     tie_embeddings: bool = True
+
+
+@dataclass
+class TransformerState:
+    """KV cache: 逐层 (k, v) 均为 (B,H,T_past,d_head), 首步前为 None."""
+
+    kv: list
+    pos: int = 0
 
 
 class CausalSelfAttention(nn.Module):
@@ -46,6 +54,21 @@ class CausalSelfAttention(nn.Module):
         y = (att @ v).transpose(1, 2).contiguous().view(B, T, C)
         return self.proj(y)
 
+    def step(self, x_t, cache):
+        """单步: x_t (B,C), cache=(k,v) 形如 (B,H,T_past,d_head); 返回 (y, cache_new)."""
+        B, C = x_t.shape
+        q, k, v = self.qkv(x_t).split(C, dim=-1)
+        q = q.view(B, 1, self.n_heads, self.d_head).transpose(1, 2)
+        k = k.view(B, 1, self.n_heads, self.d_head).transpose(1, 2)
+        v = v.view(B, 1, self.n_heads, self.d_head).transpose(1, 2)
+        if cache is not None:
+            k = torch.cat([cache[0], k], dim=2)
+            v = torch.cat([cache[1], v], dim=2)
+        att = (q @ k.transpose(-2, -1)) / math.sqrt(self.d_head)
+        att = F.softmax(att, dim=-1)
+        y = (att @ v).transpose(1, 2).contiguous().view(B, 1, C)
+        return self.proj(y)[:, 0], (k, v)
+
 
 class Block(nn.Module):
     def __init__(self, cfg: BaselineConfig):
@@ -60,6 +83,11 @@ class Block(nn.Module):
         x = x + self.attn(self.ln1(x), mask)
         h = F.gelu(self.fc1(self.ln2(x)))
         return x + self.fc2(h)
+
+    def step(self, x_t, cache):
+        y, c = self.attn.step(self.ln1(x_t), cache)
+        x_t = x_t + y
+        return x_t + self.fc2(F.gelu(self.fc1(self.ln2(x_t)))), c
 
 
 class TransformerLM(nn.Module):
@@ -110,7 +138,16 @@ class TransformerLM(nn.Module):
 
     @torch.no_grad()
     def forward_step(self, idx_t, state):
-        raise NotImplementedError
+        """单步自回归 (KV cache): idx_t (B,) -> (logits (B,V), state)."""
+        if state is None:
+            state = TransformerState(kv=[None] * len(self.blocks), pos=0)
+        x = self.embed(idx_t) + self.pos(torch.tensor(state.pos, device=idx_t.device))
+        new_kv = []
+        for blk, c in zip(self.blocks, state.kv):
+            x, cn = blk.step(x, c)
+            new_kv.append(cn)
+        logits = self.head(self.ln_f(x))
+        return logits, TransformerState(kv=new_kv, pos=state.pos + 1)
 
 
 def stack_param_count(d_model: int, d_ff: int, n_layers: int) -> int:

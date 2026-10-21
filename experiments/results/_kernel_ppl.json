@@ -1,0 +1,33 @@
+{
+  "preset": "smalln80",
+  "steps": 200,
+  "T": 256,
+  "bs": 8,
+  "threads": 8,
+  "res": {
+    "torch": {
+      "kernel": false,
+      "steps": 200,
+      "wall_s": 41.32,
+      "ms_per_step": 206.58,
+      "tokens_per_s": 9913.8,
+      "loss_first": 9.02577,
+      "loss_last": 3.93355,
+      "tail_mean_loss": 4.47315,
+      "ppl": 87.6326
+    },
+    "kernel": {
+      "kernel": true,
+      "steps": 200,
+      "wall_s": 35.35,
+      "ms_per_step": 176.761,
+      "tokens_per_s": 11586.3,
+      "loss_first": 9.02577,
+      "loss_last": 3.93153,
+      "tail_mean_loss": 4.46858,
+      "ppl": 87.2331
+    }
+  },
+  "ppl_absdiff": 0.3995000000000033,
+  "tail_loss_absdiff": 0.004570000000000185
+}

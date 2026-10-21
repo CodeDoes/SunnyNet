@@ -1,0 +1,66 @@
+{
+  "arch": "linear_attn",
+  "preset": "small",
+  "params": 1160544,
+  "params_non_embed": 374112,
+  "threads": 8,
+  "args": {
+    "arch": "linear_attn",
+    "preset": "small",
+    "steps": 600,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 60,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 600,
+    "val_batches": 8,
+    "patience": 4,
+    "no_early_stop": true,
+    "out": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\results\\_ood_train_linear_attn.json",
+    "ablation": "",
+    "mix": "",
+    "save_ckpt": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\ckpts_ood\\linear_attn.pt"
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [
+    {
+      "step": 600,
+      "train_loss": 4.202065,
+      "val_loss": 4.520813,
+      "ppl": 91.9103,
+      "ms_per_token": 0.145094,
+      "tokens_per_sec": 6892.08,
+      "grad_norm": 0.566068,
+      "lr": 0.00030002,
+      "peak_rss_mb": 806.1,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 198.39
+    }
+  ],
+  "summary": {
+    "wall_seconds": 198.39,
+    "steps_done": 600,
+    "stopped_early": false,
+    "diverged": false,
+    "best_val_loss": 4.520813,
+    "best_ppl": 91.9103,
+    "ms_per_token_mean": 0.145094,
+    "tokens_per_sec_mean": 6892.08,
+    "peak_rss_mb": 806.1,
+    "mean_grad_norm": 0.667927,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 4.202065
+  }
+}

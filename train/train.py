@@ -113,9 +113,11 @@ def _preset_cfg(preset: str, vocab: int) -> SunnyConfig:
 
 
 def build_models(arch: str, vocab: int, preset: str, ablation: dict | None,
-                 seq_len: int, seed: int):
+                 seq_len: int, seed: int, h_max: float = 0.0):
     torch.manual_seed(seed)
     sunny_cfg = _preset_cfg(preset, vocab)
+    if h_max > 0:
+        sunny_cfg.h_max = h_max
     if ablation:
         sunny_cfg.ablation = dict(ablation)
     sunny_cfg.scan_chunk = 64
@@ -171,12 +173,15 @@ def main():
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--seq-len", type=int, default=256)
+    ap.add_argument("--h-max", type=float, default=0.0, help="覆盖 SunnyConfig.h_max (0=用预设)")
     ap.add_argument("--lr", type=float, default=3e-3)
     ap.add_argument("--warmup", type=int, default=40)
     ap.add_argument("--weight-decay", type=float, default=0.01)
     ap.add_argument("--grad-clip", type=float, default=1.0)
     ap.add_argument("--seed", type=int, default=1234)
     ap.add_argument("--threads", type=int, default=0)
+    ap.add_argument("--kernel", type=int, default=-1,
+                    help="1=用 AVX2 融合内核, 0=强制 torch 路径, -1=读 SUNNY_KERNEL")
     ap.add_argument("--val-every", type=int, default=50)
     ap.add_argument("--val-batches", type=int, default=8)
     ap.add_argument("--patience", type=int, default=4, help="val loss 连续上升多少轮触发早停")
@@ -190,6 +195,12 @@ def main():
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     th = torch.get_num_threads()
+
+    if args.kernel >= 0:
+        from sunnynet.kernels.core_auto import set_kernel_active
+        set_kernel_active(bool(args.kernel), threads=th)
+    from sunnynet.kernels.core_auto import kernel_active
+    k_active = kernel_active()
 
     weights = dict(DEFAULT_MIX)
     if args.mix:
@@ -207,7 +218,7 @@ def main():
     tk = load_tokenizer()
     vocab = tk.vocab_size
 
-    sunny, base, cfg = build_models(args.arch, vocab, args.preset, ablation, args.seq_len, args.seed)
+    sunny, base, cfg = build_models(args.arch, vocab, args.preset, ablation, args.seq_len, args.seed, args.h_max)
     model = sunny if args.arch == "sunnynet" else base
     n_all = model.num_params()
     n_ne = model.num_params(non_embedding=True)
@@ -226,13 +237,13 @@ def main():
                  else "  (本机无 Cache 性能对象, 缓存命中率不可测, 以页错误率作代理, 不冒充实测)"))
 
     print(f"=== {args.arch} | preset={args.preset} | threads={th} "
-          f"| params={n_all:,} (non-embed {n_ne:,})")
+          f"| params={n_all:,} (non-embed {n_ne:,}) | kernel={k_active}")
     print(f"    steps={args.steps} bs={args.batch_size} seq={args.seq_len} "
           f"lr={args.lr} tokens={args.steps * args.batch_size * args.seq_len:,}")
     print(f"    cache counter available={cache.ok} | mix={weights} | ablation={ablation or 'none'}")
 
     log = {"arch": args.arch, "preset": args.preset, "params": n_all,
-           "params_non_embed": n_ne, "threads": th, "args": vars(args),
+           "params_non_embed": n_ne, "threads": th, "kernel": k_active, "args": vars(args),
            "mix": weights, "ablation": ablation, "history": []}
     best_val, bad, stopped = float("inf"), 0, False
     diverged = False

@@ -623,3 +623,245 @@ def test_p_raw_range_matches_analytic_bound():
         y1 = m(x).clone()
     type(m.blocks[0])._core = orig
     assert float((y0 - y1).abs().max()) == 0.0
+
+
+# ---------------------------------------------------------------- 基线推理
+def test_transformer_kv_step_matches_forward():
+    """Transformer 基线 KV cache 单步必须与整段前向严格等价 (推理对照口径)."""
+    torch.manual_seed(71)
+    cfg = BaselineConfig(vocab_size=512, d_model=64, n_heads=4, n_layers=3,
+                         d_ff=128, max_len=256)
+    m = TransformerLM(cfg).double().eval()
+    idx = torch.randint(0, 512, (1, 96))
+    with torch.no_grad():
+        full = m(idx)
+        st, outs = None, []
+        for t in range(idx.shape[1]):
+            lg, st = m.forward_step(idx[:, t], st)
+            outs.append(lg)
+        step = torch.stack(outs, dim=1)
+    assert float((step - full).abs().max()) < 1e-12
+
+
+def test_transformer_kv_segment_continuation():
+    """先整段再单步续算, 与一次性整段前向等价."""
+    torch.manual_seed(72)
+    cfg = BaselineConfig(vocab_size=512, d_model=64, n_heads=4, n_layers=3,
+                         d_ff=128, max_len=256)
+    m = TransformerLM(cfg).double().eval()
+    idx = torch.randint(0, 512, (1, 80))
+    with torch.no_grad():
+        full = m(idx)
+        st = None
+        for t in range(32):
+            _, st = m.forward_step(idx[:, t], st)
+        outs = []
+        for t in range(32, 80):
+            lg, st = m.forward_step(idx[:, t], st)
+            outs.append(lg)
+        seg = torch.stack(outs, dim=1)
+    assert float((seg - full[:, 32:]).abs().max()) < 1e-12
+
+
+# ---------------------------------------------------------------- 手写内核
+def test_scan_avx2_kernel_matches_torch():
+    """AVX2 手写 scan 内核前向/反向必须与 PyTorch 等价 (编译不可用时跳过)."""
+    from sunnynet.kernels import kernel_available
+    if not kernel_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    import ctypes
+    import numpy as np
+    from sunnynet.kernels import load_scan_kernel
+    lib = load_scan_kernel()
+    P = ctypes.POINTER(ctypes.c_float)
+    B, T, N = 2, 64, 32
+    rng = np.random.default_rng(3)
+    p_np = (0.5 + 0.49 * rng.random((B, T, N))).astype(np.float32)
+    nu_np = rng.standard_normal((B, T, N)).astype(np.float32)
+    s0_np = np.zeros((B, N), dtype=np.float32)
+
+    pt = torch.from_numpy(p_np).clone().requires_grad_(True)
+    nt = torch.from_numpy(nu_np).clone().requires_grad_(True)
+    s = torch.zeros(B, N)
+    outs = []
+    for t in range(T):
+        s = pt[:, t] * s + (1 - pt[:, t]) * nt[:, t]
+        outs.append(s)
+    seq = torch.stack(outs, dim=1)
+    dout = rng.standard_normal((B, T, N)).astype(np.float32)
+    (seq * torch.from_numpy(dout)).sum().backward()
+
+    out = np.empty((B, T, N), dtype=np.float32)
+    send = np.empty((B, N), dtype=np.float32)
+    lib.scan_f32(p_np.ctypes.data_as(P), nu_np.ctypes.data_as(P), s0_np.ctypes.data_as(P),
+                 out.ctypes.data_as(P), send.ctypes.data_as(P), B, T, N)
+    fwd = float(np.abs(out - seq.detach().numpy()).max())
+
+    dp = np.zeros((B, T, N), dtype=np.float32)
+    dnu = np.zeros((B, T, N), dtype=np.float32)
+    ds0 = np.zeros((B, N), dtype=np.float32)
+    lib.scan_bwd_f32(p_np.ctypes.data_as(P), nu_np.ctypes.data_as(P),
+                     s0_np.ctypes.data_as(P),
+                     seq.detach().numpy().astype(np.float32).ctypes.data_as(P),
+                     dout.ctypes.data_as(P), dp.ctypes.data_as(P),
+                     dnu.ctypes.data_as(P), ds0.ctypes.data_as(P), B, T, N)
+    dp_d = float(np.abs(dp - pt.grad.numpy()).max())
+    dnu_d = float(np.abs(dnu - nt.grad.numpy()).max())
+    assert fwd < 1e-5, f"前向不一致 {fwd}"
+    assert dp_d < 1e-4 and dnu_d < 1e-4, f"反向不一致 dp={dp_d} dnu={dnu_d}"
+
+
+def test_core_kernel_matches_torch_forward():
+    """融合 core 内核 (竞争+概率+扫描) 前向必须与 torch 参考等价."""
+    from sunnynet.kernels import kernel_available, load_kernel
+    if not kernel_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    import ctypes
+    import numpy as np
+    lib = load_kernel()
+    P = ctypes.POINTER(ctypes.c_float)
+    B, T, D, G = 2, 48, 32, 8
+    rng = np.random.default_rng(11)
+    q_np = (rng.standard_normal((B, T, 2 * D)) * 0.6).astype(np.float32)
+    delta_np = (0.01 + 0.4 * rng.random(D)).astype(np.float32)
+    s0_np = (rng.standard_normal((B, D)) * 0.1).astype(np.float32)
+    states = np.empty((B, T, D), dtype=np.float32)
+    uo = np.empty((B, T, D), dtype=np.float32)
+    po = np.empty((B, T, D), dtype=np.float32)
+    lib.core_fwd_f32(q_np.ctypes.data_as(P), delta_np.ctypes.data_as(P),
+                     s0_np.ctypes.data_as(P), states.ctypes.data_as(P),
+                     uo.ctypes.data_as(P), po.ctypes.data_as(P), B, T, D)
+
+    qt = torch.from_numpy(q_np).double()
+    dt = torch.from_numpy(delta_np).double()
+    s0t = torch.from_numpy(s0_np).double()
+    ur, gt = qt[..., :D], qt[..., D:]
+    gg = gt.view(B, T, D // G, G)
+    w = torch.sigmoid(gg - torch.roll(gg, -1, dims=-1)) * \
+        torch.sigmoid(gg - torch.roll(gg, -2, dims=-1))
+    u_ref = ur * w.reshape(B, T, D)
+    p_ref = 1.0 - dt.view(1, 1, -1) * (1.0 - torch.sigmoid(gt))
+    s = s0t.clone()
+    sts = []
+    for t in range(T):
+        s = p_ref[:, t] * s + (1 - p_ref[:, t]) * u_ref[:, t]
+        sts.append(s.clone())
+    states_ref = torch.stack(sts, dim=1)
+    assert float((torch.from_numpy(uo).double() - u_ref).abs().max()) < 1e-5
+    assert float((torch.from_numpy(po).double() - p_ref).abs().max()) < 1e-5
+    assert float((torch.from_numpy(states).double() - states_ref).abs().max()) < 1e-5
+
+
+def test_core_kernel_matches_torch_backward():
+    """融合 core 内核反向必须与 autograd 等价 (dq/ddelta/ds0)."""
+    from sunnynet.kernels import kernel_available, load_kernel
+    if not kernel_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    import ctypes
+    import numpy as np
+    lib = load_kernel()
+    P = ctypes.POINTER(ctypes.c_float)
+    B, T, D, G = 2, 40, 32, 8
+    rng = np.random.default_rng(12)
+    q_np = (rng.standard_normal((B, T, 2 * D)) * 0.6).astype(np.float32)
+    delta_np = (0.01 + 0.4 * rng.random(D)).astype(np.float32)
+    s0_np = (rng.standard_normal((B, D)) * 0.1).astype(np.float32)
+    states = np.empty((B, T, D), dtype=np.float32)
+    uo = np.empty((B, T, D), dtype=np.float32)
+    po = np.empty((B, T, D), dtype=np.float32)
+    lib.core_fwd_f32(q_np.ctypes.data_as(P), delta_np.ctypes.data_as(P),
+                     s0_np.ctypes.data_as(P), states.ctypes.data_as(P),
+                     uo.ctypes.data_as(P), po.ctypes.data_as(P), B, T, D)
+    dstate_np = rng.standard_normal((B, T, D)).astype(np.float32)
+    duin_np = rng.standard_normal((B, T, D)).astype(np.float32)
+    dq = np.zeros((B, T, 2 * D), dtype=np.float32)
+    dd = np.zeros(D, dtype=np.float32)
+    ds0 = np.zeros((B, D), dtype=np.float32)
+    lib.core_bwd_f32(q_np.ctypes.data_as(P), delta_np.ctypes.data_as(P),
+                     s0_np.ctypes.data_as(P), states.ctypes.data_as(P),
+                     uo.ctypes.data_as(P), po.ctypes.data_as(P),
+                     dstate_np.ctypes.data_as(P), duin_np.ctypes.data_as(P),
+                     dq.ctypes.data_as(P), dd.ctypes.data_as(P),
+                     ds0.ctypes.data_as(P), B, T, D)
+
+    qt = torch.from_numpy(q_np).clone().double().requires_grad_(True)
+    dt = torch.from_numpy(delta_np).clone().double().requires_grad_(True)
+    s0t = torch.from_numpy(s0_np).clone().double().requires_grad_(True)
+    ur, gt = qt[..., :D], qt[..., D:]
+    gg = gt.view(B, T, D // G, G)
+    w = torch.sigmoid(gg - torch.roll(gg, -1, dims=-1)) * \
+        torch.sigmoid(gg - torch.roll(gg, -2, dims=-1))
+    u = ur * w.reshape(B, T, D)
+    p = 1.0 - dt.view(1, 1, -1) * (1.0 - torch.sigmoid(gt))
+    s = s0t.clone()
+    sts = []
+    for t in range(T):
+        s = p[:, t] * s + (1 - p[:, t]) * u[:, t]
+        sts.append(s)
+    stt = torch.stack(sts, dim=1)
+    loss = (stt * torch.from_numpy(dstate_np).double()).sum() + \
+           (u * torch.from_numpy(duin_np).double()).sum()
+    loss.backward()
+    assert float(np.abs(dq - qt.grad.numpy()).max()) < 1e-4
+    assert float(np.abs(dd - dt.grad.numpy()).max()) < 1e-4
+    assert float(np.abs(ds0 - s0t.grad.numpy()).max()) < 1e-4
+
+
+def test_kernel_path_matches_torch_end_to_end():
+    """内核接入模型后, loss 与全部参数梯度必须与 torch 路径一致."""
+    from sunnynet.kernels import kernel_available
+    import sunnynet.kernels.core_auto as ca
+    if not kernel_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    torch.manual_seed(13)
+    V, B, T = 512, 2, 64
+    cfg = SunnyConfig(vocab_size=V, dim=80, inner=160, rank=244, layers=4, h_max=2048.0)
+    cfg.scan_chunk = 64
+    m = SunnyNet(cfg).train()
+    x = torch.randint(0, V, (B, T))
+    y = torch.randint(0, V, (B, T))
+
+    def run():
+        loss = F.cross_entropy(m(x).reshape(-1, V), y.reshape(-1))
+        loss.backward()
+        grads = [p.grad.clone() for p in m.parameters() if p.grad is not None]
+        m.zero_grad(set_to_none=True)
+        return float(loss.detach()), grads
+
+    ca.set_kernel_active(False)
+    l0, g0 = run()
+    ca.set_kernel_active(True, threads=4)
+    try:
+        l1, g1 = run()
+    finally:
+        ca.set_kernel_active(False)
+    assert abs(l0 - l1) < 1e-5, f"loss 不一致 {l0} vs {l1}"
+    for a, b in zip(g0, g1):
+        assert float((a - b).abs().max()) < 1e-5
+
+
+def test_step_kernel_matches_forward_equivalence():
+    """推理态内核接入后, 单步解码与整段前向仍严格等价."""
+    from sunnynet.kernels import kernel_available
+    import sunnynet.kernels.core_auto as ca
+    if not kernel_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    torch.manual_seed(14)
+    V, B, T = 512, 2, 64
+    cfg = SunnyConfig(vocab_size=V, dim=80, inner=160, rank=244, layers=4, h_max=2048.0)
+    cfg.scan_chunk = 64
+    m = SunnyNet(cfg).eval()
+    idx = torch.randint(0, V, (B, T))
+    ca.set_kernel_active(True, threads=4)
+    try:
+        with torch.no_grad():
+            full = m(idx)
+            stt = m.init_state(B)
+            outs = []
+            for t in range(T):
+                lg, stt = m.forward_step(idx[:, t], stt)
+                outs.append(lg)
+            step = torch.stack(outs, dim=1)
+    finally:
+        ca.set_kernel_active(False)
+    assert float((step - full).abs().max()) < 1e-5

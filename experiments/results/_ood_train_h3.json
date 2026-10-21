@@ -1,0 +1,66 @@
+{
+  "arch": "h3",
+  "preset": "small",
+  "params": 1206608,
+  "params_non_embed": 354640,
+  "threads": 8,
+  "args": {
+    "arch": "h3",
+    "preset": "small",
+    "steps": 600,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 60,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 600,
+    "val_batches": 8,
+    "patience": 4,
+    "no_early_stop": true,
+    "out": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\results\\_ood_train_h3.json",
+    "ablation": "",
+    "mix": "",
+    "save_ckpt": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\ckpts_ood\\h3.pt"
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [
+    {
+      "step": 600,
+      "train_loss": 3.544113,
+      "val_loss": 3.987697,
+      "ppl": 53.9305,
+      "ms_per_token": 0.144216,
+      "tokens_per_sec": 6934.05,
+      "grad_norm": 0.575266,
+      "lr": 0.00030002,
+      "peak_rss_mb": 837.8,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 199.05
+    }
+  ],
+  "summary": {
+    "wall_seconds": 199.05,
+    "steps_done": 600,
+    "stopped_early": false,
+    "diverged": false,
+    "best_val_loss": 3.987697,
+    "best_ppl": 53.9305,
+    "ms_per_token_mean": 0.144216,
+    "tokens_per_sec_mean": 6934.05,
+    "peak_rss_mb": 837.8,
+    "mean_grad_norm": 0.706632,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 3.544113
+  }
+}

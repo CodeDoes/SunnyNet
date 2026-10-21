@@ -1,0 +1,105 @@
+{
+  "steps": 600,
+  "orig": [
+    "zh_ancient",
+    "en_literature",
+    "code_python"
+  ],
+  "ext": [
+    "arxiv_en",
+    "zh_tech_news"
+  ],
+  "rows": [
+    {
+      "arch": "sunnynet",
+      "ppl": {
+        "zh_ancient": 326.116,
+        "en_literature": 20.852,
+        "code_python": 14.488,
+        "arxiv_en": 35.581,
+        "zh_tech_news": 321.08
+      },
+      "orig_mean": 120.485,
+      "ext_mean": 178.331,
+      "ood_gap": 1.48
+    },
+    {
+      "arch": "transformer",
+      "ppl": {
+        "zh_ancient": 423.774,
+        "en_literature": 37.655,
+        "code_python": 28.122,
+        "arxiv_en": 61.335,
+        "zh_tech_news": 531.771
+      },
+      "orig_mean": 163.184,
+      "ext_mean": 296.553,
+      "ood_gap": 1.817
+    },
+    {
+      "arch": "linear_attn",
+      "ppl": {
+        "zh_ancient": 422.429,
+        "en_literature": 36.94,
+        "code_python": 28.431,
+        "arxiv_en": 61.546,
+        "zh_tech_news": 489.226
+      },
+      "orig_mean": 162.6,
+      "ext_mean": 275.386,
+      "ood_gap": 1.694
+    },
+    {
+      "arch": "rwkv",
+      "ppl": {
+        "zh_ancient": 375.407,
+        "en_literature": 23.594,
+        "code_python": 16.408,
+        "arxiv_en": 41.031,
+        "zh_tech_news": 427.216
+      },
+      "orig_mean": 138.47,
+      "ext_mean": 234.124,
+      "ood_gap": 1.691
+    },
+    {
+      "arch": "mamba",
+      "ppl": {
+        "zh_ancient": 373.401,
+        "en_literature": 23.307,
+        "code_python": 16.242,
+        "arxiv_en": 40.866,
+        "zh_tech_news": 499.737
+      },
+      "orig_mean": 137.65,
+      "ext_mean": 270.302,
+      "ood_gap": 1.964
+    },
+    {
+      "arch": "hyena",
+      "ppl": {
+        "zh_ancient": 404.473,
+        "en_literature": 32.063,
+        "code_python": 24.058,
+        "arxiv_en": 54.222,
+        "zh_tech_news": 400.394
+      },
+      "orig_mean": 153.531,
+      "ext_mean": 227.308,
+      "ood_gap": 1.481
+    },
+    {
+      "arch": "h3",
+      "ppl": {
+        "zh_ancient": 358.143,
+        "en_literature": 18.693,
+        "code_python": 12.986,
+        "arxiv_en": 31.518,
+        "zh_tech_news": 446.774
+      },
+      "orig_mean": 129.941,
+      "ext_mean": 239.146,
+      "ood_gap": 1.84
+    }
+  ]
+}

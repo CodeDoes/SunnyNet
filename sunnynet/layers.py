@@ -12,6 +12,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .init import orthogonal_spectrum_
+from .kernels.core_auto import core_forward, dw_step, kernel_active, step_core
 from .ops import CenteredScaleNorm, horizon_logit, logspace_scan
 
 __all__ = ["StateCirculant", "DepthwiseCausal", "SunnyBlock", "SunnyState"]
@@ -127,6 +128,10 @@ class SunnyBlock(nn.Module):
         # 解析下界已高于 p_floor 时 clamp 不可达, 构造期判掉省一次全宽张量往返.
         self._need_clamp = self.p_min_bound < self.p_floor
         self.group = _pick_group(dim, group)
+        self._w_t: torch.Tensor | None = None
+        self._w_t_ver = -1
+        self._delta_cache: torch.Tensor | None = None
+        self._delta_ver = -1
         self._init_spectral(rho0, decay_beta, layer_index, rank, generator)
 
     def delta(self) -> torch.Tensor:
@@ -134,6 +139,13 @@ class SunnyBlock(nn.Module):
         span = math.log(self.h_max / self.h_min)
         H = self.h_min * torch.exp(span * torch.sigmoid(self.theta))
         return 1.0 / H
+
+    def delta_cached(self) -> torch.Tensor:
+        """推理态用: delta 只依赖 theta, 每步重算是纯浪费. theta 变更时重算."""
+        if self._delta_cache is None or self._delta_ver != self.theta._version:
+            self._delta_cache = self.delta().detach()
+            self._delta_ver = self.theta._version
+        return self._delta_cache
 
     def _init_spectral(self, rho0, beta, layer_index, rank, generator):
         rho = rho0 * (float(layer_index + 1) ** -beta)
@@ -143,6 +155,23 @@ class SunnyBlock(nn.Module):
             orthogonal_spectrum_(self.W_z.weight, rho, generator)
             orthogonal_spectrum_(self.W_c.weight, rho, generator)
             orthogonal_spectrum_(self.W_s.weight, rho * 0.5, generator)
+
+    def _use_kernel(self, ap: torch.Tensor) -> bool:
+        """内核前提: fp32 CPU 连续, group==8, 非 ablated 门控, 未 clamp."""
+        if not kernel_active():
+            return False
+        if self.group != 8 or self.dim % 8 or not self.use_decay_gate or self._need_clamp:
+            return False
+        if ap.dtype != torch.float32 or not ap.is_cpu or not ap.is_contiguous():
+            return False
+        return ap.shape[-1] == self.dim and self.use_circulant
+
+    def _core_kernel(self, ap: torch.Tensor, s: torch.Tensor):
+        """融合 core: q -> (u, states). 复用 torch 侧 q 计算与 delta。"""
+        q = self.U(self.V(ap))
+        delta = self.delta().contiguous()
+        (u, states), = (core_forward(q, delta, s),)
+        return u, states
 
     def _compete(self, gate: torch.Tensor) -> torch.Tensor:
         """组内成对竞争门控 w = sigmoid(g_i-g_j)*sigmoid(g_i-g_k) in (0,1). Jacobian O(1)."""
@@ -242,8 +271,11 @@ class SunnyBlock(nn.Module):
         chunk = min(self.scan_chunk, T)
         pad = (-T) % chunk
         ap = torch.cat([a, a.new_zeros(B, pad, D)], dim=1) if pad else a
-        u, gate, p = self._core(ap)
-        states, _ = logspace_scan(u, p, s, chunk=chunk, p_min_hint=self.p_min_bound)
+        if not pad and self._use_kernel(ap):
+            u, states = self._core_kernel(ap, s)
+        else:
+            u, gate, p = self._core(ap)
+            states, _ = logspace_scan(u, p, s, chunk=chunk, p_min_hint=self.p_min_bound)
         out = self._emit(u, states, s)
         if pad:
             out = out[:, :T]
@@ -256,14 +288,30 @@ class SunnyBlock(nn.Module):
         """单步: x_t (B,D) -> (out (B,D), s' (B,D), hist_new (B,k-1,D))."""
         raw = self.norm_in(x_t)
         k = max(0, self.taps - 1)
-        a_t = raw if k == 0 else raw + self.dw.step(raw, hist)
+        use_k = (kernel_active() and self.group == 8 and not self._need_clamp
+                 and self.use_circulant and self.use_decay_gate and k > 0
+                 and raw.dtype == torch.float32 and raw.is_contiguous()
+                 and s.is_contiguous() and hist.is_contiguous())
         if k:
+            if use_k:
+                if self._w_t is None or self._w_t_ver != self.dw.weight._version:
+                    self._w_t = self.dw.weight.detach().transpose(1, 2) \
+                        .reshape(self.taps, self.dim).contiguous()
+                    self._w_t_ver = self.dw.weight._version
+                a_t = raw + dw_step(raw, hist, self._w_t, self.taps)
+            else:
+                a_t = raw + self.dw.step(raw, hist)
             hist_new = torch.cat([raw[:, None, :], hist[:, :k - 1]], dim=1)
         else:
+            a_t = raw
             hist_new = hist
-        u_t, gate, p_t = self._core(a_t[:, None, :])
-        u_t, gate, p_t = u_t[:, 0], gate[:, 0], p_t[:, 0]
-        s_new = p_t * s + (1.0 - p_t) * u_t
+        if use_k:
+            q = self.U(self.V(a_t))
+            u_t, s_new = step_core(q, self.delta_cached(), s)
+        else:
+            u_t, gate, p_t = self._core(a_t[:, None, :])
+            u_t, gate, p_t = u_t[:, 0], gate[:, 0], p_t[:, 0]
+            s_new = p_t * s + (1.0 - p_t) * u_t
         y = self._readout(u_t[:, None, :], None)[:, 0]
         sn = self.norm_s(s_new[:, None, :])[:, 0] if self.norm_s is not None else s_new
         if self.circ is not None:

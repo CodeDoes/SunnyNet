@@ -1,0 +1,90 @@
+{
+  "T": 1024,
+  "batch": 8,
+  "rows": [
+    {
+      "arch": "sunnynet",
+      "T": 1024,
+      "batch": 8,
+      "stack": 365844,
+      "ms_per_token": 0.13186,
+      "train_ms": 1080.2,
+      "rss_alloc_mb": 291.1,
+      "peak_rss_mb": 1812.1,
+      "act_mb": 1521.0,
+      "loss": 7.8448
+    },
+    {
+      "arch": "transformer",
+      "T": 1024,
+      "batch": 8,
+      "stack": 369200,
+      "ms_per_token": 0.55693,
+      "train_ms": 4562.4,
+      "rss_alloc_mb": 422.9,
+      "peak_rss_mb": 3192.0,
+      "act_mb": 2769.1,
+      "loss": 8.2407
+    },
+    {
+      "arch": "linear_attn",
+      "T": 1024,
+      "batch": 8,
+      "stack": 374112,
+      "ms_per_token": 0.17646,
+      "train_ms": 1445.6,
+      "rss_alloc_mb": 294.8,
+      "peak_rss_mb": 1776.7,
+      "act_mb": 1481.9,
+      "loss": 8.6184
+    },
+    {
+      "arch": "rwkv",
+      "T": 1024,
+      "batch": 8,
+      "stack": 371712,
+      "ms_per_token": 0.19677,
+      "train_ms": 1611.92,
+      "rss_alloc_mb": 294.9,
+      "peak_rss_mb": 1611.3,
+      "act_mb": 1316.5,
+      "loss": 8.4122
+    },
+    {
+      "arch": "mamba",
+      "T": 1024,
+      "batch": 8,
+      "stack": 367136,
+      "ms_per_token": 0.14721,
+      "train_ms": 1205.96,
+      "rss_alloc_mb": 294.2,
+      "peak_rss_mb": 1779.6,
+      "act_mb": 1485.4,
+      "loss": 8.4408
+    },
+    {
+      "arch": "hyena",
+      "T": 1024,
+      "batch": 8,
+      "stack": 369488,
+      "ms_per_token": 0.16754,
+      "train_ms": 1372.52,
+      "rss_alloc_mb": 295.8,
+      "peak_rss_mb": 1809.0,
+      "act_mb": 1513.2,
+      "loss": 8.5476
+    },
+    {
+      "arch": "h3",
+      "T": 1024,
+      "batch": 8,
+      "stack": 354640,
+      "ms_per_token": 0.1319,
+      "train_ms": 1080.49,
+      "rss_alloc_mb": 295.1,
+      "peak_rss_mb": 1688.7,
+      "act_mb": 1393.6,
+      "loss": 8.21
+    }
+  ]
+}

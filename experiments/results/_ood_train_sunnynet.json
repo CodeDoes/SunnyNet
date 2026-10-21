@@ -1,0 +1,66 @@
+{
+  "arch": "sunnynet",
+  "preset": "small",
+  "params": 1414420,
+  "params_non_embed": 365844,
+  "threads": 8,
+  "args": {
+    "arch": "sunnynet",
+    "preset": "small",
+    "steps": 600,
+    "batch_size": 8,
+    "seq_len": 256,
+    "lr": 0.003,
+    "warmup": 60,
+    "weight_decay": 0.01,
+    "grad_clip": 1.0,
+    "seed": 1234,
+    "threads": 8,
+    "val_every": 600,
+    "val_batches": 8,
+    "patience": 4,
+    "no_early_stop": true,
+    "out": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\results\\_ood_train_sunnynet.json",
+    "ablation": "",
+    "mix": "",
+    "save_ckpt": "C:\\Users\\陈旭\\Desktop\\CPU神经网络\\experiments\\ckpts_ood\\sunnynet.pt"
+  },
+  "mix": {
+    "zh_ancient": 0.4,
+    "en_literature": 0.35,
+    "code_python": 0.25
+  },
+  "ablation": {},
+  "history": [
+    {
+      "step": 600,
+      "train_loss": 3.615903,
+      "val_loss": 4.014379,
+      "ppl": 55.3889,
+      "ms_per_token": 0.14823,
+      "tokens_per_sec": 6746.29,
+      "grad_norm": 0.655622,
+      "lr": 0.00030002,
+      "peak_rss_mb": 866.9,
+      "cache_hit": null,
+      "page_faults_per_sec": null,
+      "elapsed_s": 202.56
+    }
+  ],
+  "summary": {
+    "wall_seconds": 202.56,
+    "steps_done": 600,
+    "stopped_early": false,
+    "diverged": false,
+    "best_val_loss": 4.014379,
+    "best_ppl": 55.3889,
+    "ms_per_token_mean": 0.14823,
+    "tokens_per_sec_mean": 6746.29,
+    "peak_rss_mb": 866.9,
+    "mean_grad_norm": 0.732845,
+    "cache_hit_mean": null,
+    "cache_counter_kind": "page_faults_per_sec",
+    "page_faults_per_sec_mean": null,
+    "final_train_loss": 3.615903
+  }
+}
