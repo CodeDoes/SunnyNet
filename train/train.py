@@ -17,7 +17,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from build_corpus import DOMAINS, load_tokens  # noqa: E402
+from build_corpus import DOMAINS, load_tokenizer, load_tokens  # noqa: E402
 from sunnynet.baseline import BaselineConfig, TransformerLM, solve_baseline_for_params  # noqa: E402
 from sunnynet.linear_baselines import (BLOCKS, LINEAR_ARCHS, _LMBase,  # noqa: E402
                                        build_linear_baseline)
@@ -204,8 +204,7 @@ def main():
             k, v = kv.split("=")
             ablation[k] = bool(int(v))
 
-    from sunnynet.tokenizer import BPETokenizer
-    tk = BPETokenizer.load(ROOT / "data" / "proc" / "tokenizer.json")
+    tk = load_tokenizer()
     vocab = tk.vocab_size
 
     sunny, base, cfg = build_models(args.arch, vocab, args.preset, ablation, args.seq_len, args.seed)

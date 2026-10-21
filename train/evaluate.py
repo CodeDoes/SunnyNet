@@ -28,7 +28,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from build_corpus import DOMAINS, load_tokens  # noqa: E402
+from build_corpus import DOMAINS, load_tokenizer, load_tokens  # noqa: E402
 from sunnynet.linear_baselines import LINEAR_ARCHS  # noqa: E402
 from sunnynet.model import SunnyConfig, SunnyNet  # noqa: E402
 from sunnynet.profiling import CacheCounter, PerfTracker  # noqa: E402
@@ -187,8 +187,7 @@ def main():
     ap.add_argument("--skip-latency", action="store_true")
     args = ap.parse_args()
 
-    from sunnynet.tokenizer import BPETokenizer
-    tk = BPETokenizer.load(ROOT / "data" / "proc" / "tokenizer.json")
+    tk = load_tokenizer()
     model, cfg = load_model(args.ckpt)
     vocab = cfg.vocab_size
     if hasattr(cfg, "dim"):
