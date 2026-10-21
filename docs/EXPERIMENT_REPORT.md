@@ -2402,6 +2402,57 @@ C 内核 8 线程对 1 线程再快 1.39×（5/5）。**边界**：单线程单�
 `--gguf-backend c` 走 C 内核（`sunnynet/cli.py` `_main_gguf_c`），需先运行
 `experiments/_export_rwkv7.py` 导出 blob。
 
+### 24.11 INT4 权重量化
+
+`sunnynet/runtime/quant.c`。分组对称 INT4：每 64 个连续权重共享一个 fp32 scale，
+量化值域 [-8, 7]，两值一字节（字节 k 低半字节 = 组内第 k 个，高半字节 = 第 k+32 个）。
+量化 GEMV 把激活也按同样分组量化到 INT8，用 `maddubs` 做点积：
+
+```
+Σᵢ (qᵢ − 8) xᵢ = Σᵢ qᵢ xᵢ − 8 Σᵢ xᵢ
+```
+
+权重保持无符号 [0,15] 直接进第一操作数，激活作有符号进第二操作数。
+整模型 C 内核（`rwkv7.c`）按矩阵标志位混用 fp32 / INT4；向量与嵌入表保持 fp32
+（嵌入是查表不是乘加）。
+
+**（1）原语正确性**（`tests/test_quant_i4.py`）
+量化 GEMV 的整数路径与显式整数求和**逐位一致**；反量化误差不超过该 block 的
+`scale/2`；对 fp32 GEMV 的相对误差 ~0.11（4-bit 预期内）。
+
+**（2）矩阵级速度**（`experiments/_quant_i4_bench.py`，单线程、每格独立子进程、3 轮中位）
+
+| 矩阵 (out×in) | fp32 ms | INT4 ms | 加速 |
+|---|---|---|---|
+| 768×768 | 0.152 | 0.147 | 1.03× |
+| 3072×768 | 0.308 | 0.174 | 1.77× |
+| 768×3072 | 0.305 | 0.180 | 1.70× |
+| 65536×768 | 7.036 | 1.659 | 4.24× |
+
+小矩阵无收益（解码受带宽限制、矩阵本身已在 L1/L2），大矩阵 4.24× 来自读取量降到 1/8。
+
+**（3）端到端**（`experiments/_rwkv7_int4_e2e.py`，整模型单步、单线程、每格独立子进程、
+5 轮交错、50 步中位）
+
+| 口径 | fp32 | INT4 |
+|---|---|---|
+| blob 体积 | 729.1 MB | 269.0 MB |
+| 单步中位 | 49.16 ms | 17.35 ms |
+
+端到端 **2.83×**（5/5 逐轮占优），体积 2.7× 压缩。
+
+**（4）质量**（`experiments/_rwkv7_int4_quality.py`，同 prompt 贪心对比）
+英文事实/常识续写保持连贯（"The Eiffel Tower is located in the city of Paris, France…"）；
+中文与代码有退化（中文重复、代码 `fibonacci` 递推式改变）。**边界**：RWKV-7 无本项目
+验证集，不作 ppl 陈述；此处只发布"能跑且快"，**不声称质量无损**——4-bit 欲压质量须配
+校准或混合精度。
+
+**（5）开发中定位的 bug**
+- 导出器给**每个**张量都写 4 字节格式标签，但 C 侧 `take_f32` 未跳过，导致标签被当作
+  权重数据、游标全面错位并读到文件尾之外。修法是 `take_f32` 先跳 4 字节。
+- INT4 重量化矩阵方向：`gemv_i4` 要 `(out, in)`，而导出器写入的是 `(in, out)`，
+  须在量化前转置，否则读取越界崩溃。
+
 ---
 
 ## 25. 完整复现
@@ -2475,7 +2526,11 @@ python -X utf8 experiments/_rwkv7_gguf_bench.py              # §24.9 numpy 生�
 python -X utf8 experiments/_export_rwkv7.py                  # §24.10 导出 C blob (需 GGUF)
 python -X utf8 experiments/_rwkv7_c_equiv.py 12              # §24.10 C vs numpy
 python -X utf8 experiments/_rwkv7_c_bench.py 5               # §24.10 C 内核速度
+python -X utf8 experiments/_quant_i4_bench.py                # §24.11 INT4 矩阵速度
+python -X utf8 experiments/_rwkv7_int4_e2e.py 5              # §24.11 INT4 端到端
+python -X utf8 experiments/_rwkv7_int4_quality.py            # §24.11 INT4 质量对照
 python -X utf8 -m pytest tests/test_rwkv7_c.py -v
+python -X utf8 -m pytest tests/test_quant_i4.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。

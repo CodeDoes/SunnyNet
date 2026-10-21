@@ -512,6 +512,27 @@ python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
     --gguf-backend c --prompt "The Eiffel Tower is located in" --max-new 40 --stats
 ```
 
+### INT4 权重量化（`sunnynet/runtime/quant.c`）
+
+分组对称 INT4：每 64 个连续权重共享一个 fp32 scale，量化值域 [-8, 7]，两值一字节。
+量化 GEMV 把激活也按同样分组量化到 INT8，用 `maddubs` 做点积
+（`Σ(qᵢ−8)xᵢ = Σqᵢxᵢ − 8Σxᵢ`），权重保持无符号 [0,15] 直接进第一操作数。
+整模型 C 内核按矩阵标志位混用 fp32 / INT4（向量与嵌入表保持 fp32）。
+
+导出：`experiments/_export_rwkv7.py`（不带 `--f32` 即 INT4，输出 `.q4.bin`）。
+
+| 口径 | fp32 | INT4 |
+|---|---|---|
+| blob 体积 | 729.1 MB | 269.0 MB |
+| 单步解码（单线程中位） | 49.16 ms | 17.35 ms |
+
+INT4 端到端 **2.83×**（5/5 逐轮占优），体积 2.7× 压缩。整数路径与显式整数公式
+**逐位一致**（`tests/test_quant_i4.py`）；对 fp32 GEMV 的相对误差 ~0.11（4-bit 预期内）。
+生成质量：英文保持连贯（"Paris, France…"），中文与代码有退化——**4-bit 欲压质量须配
+校准/混合精度**，此处只发布"能跑且快"的结论，不声称质量无损。
+
+CLI：`--quant int4`（配合 `--gguf-backend c`）。
+
 ### 命令行
 
 ```bash
@@ -535,9 +556,10 @@ python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
 现有资产：原创架构、AVX2 融合内核（训练步 1.10–1.17×）、通用递推 C Runtime
 （对向量化基线中位 9.9×）、**C 整模型单步解码（B=1 单线程 1.53–2.05×）**、
 跨架构映射验证、**GGUF 只读 + RWKV-7 权重跑通（数值与官方 .pth 等价）**、
-**RWKV-7 整模型 C 内核（对 numpy 5.39×，8 线程 7.49×）**。
+**RWKV-7 整模型 C 内核（对 numpy 5.39×，8 线程 7.49×）**、
+**INT4 权重量化（端到端 2.83×，体积 2.7× 压缩）**。
 
-近期：INT4 权重量化、pip 发布（v0.1.0）、C API 稳定 ABI。
+近期：pip 发布（v0.1.0）、C API 稳定 ABI。
 
 中期：补矩阵值递推（外积 / rank-1 校正）覆盖 RWKV-7、DeltaNet、GLA 这类
 （IR 已支持，缺模型加载与权重转换）；AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务；

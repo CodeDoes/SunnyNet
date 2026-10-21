@@ -10,6 +10,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 GGUF = ROOT / "experiments/gguf/rwkv7-191M-world-bf16.gguf"
 BLOB = ROOT / "experiments/gguf/rwkv7-191M-world-bf16.runtime.bin"
+Q4 = ROOT / "experiments/gguf/rwkv7-191M-world-bf16.q4.bin"
 
 
 def _have():
@@ -89,3 +90,24 @@ def test_c_kernel_generates_coherent_text():
         logits = np.array(c.step(nxt), dtype=np.float32)
     text = ref.tok.decode(out)
     assert "Paris" in text, text
+
+
+@pytest.mark.skipif(not (GGUF.exists() and Q4.exists()), reason="缺少 INT4 blob")
+def test_int4_blob_loads_and_generates():
+    """INT4 blob 能加载且贪心生成保持事实连贯 (英文)."""
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from sunnynet.runtime.rwkv7 import RWKV7
+    from sunnynet.runtime.rwkv7_c import SnRWKV7
+
+    ref = RWKV7(GGUF)
+    m = SnRWKV7(Q4, ref.vocab)
+    m.reset()
+    ids = ref.tok.encode(PROMPT)
+    logits = np.array(m.prefill(ids), dtype=np.float32)
+    out = list(ids)
+    for _ in range(16):
+        nxt = int(np.argmax(logits))
+        out.append(nxt)
+        logits = np.array(m.step(nxt), dtype=np.float32)
+    assert "Paris" in ref.tok.decode(out)

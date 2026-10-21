@@ -20,7 +20,7 @@ def _compile(gcc: str) -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
     cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
            "-funroll-loops", "-fopenmp", "-static", "-shared", "-std=c11",
-           str(HERE / "rwkv7.c"), "-o", str(DLL)]
+           str(HERE / "rwkv7.c"), str(HERE / "quant.c"), "-o", str(DLL)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"rwkv7 runtime 编译失败: {(r.stderr or r.stdout)[-800:]}")
@@ -31,7 +31,7 @@ def _needs_rebuild() -> bool:
         return True
     t = DLL.stat().st_mtime
     return any(s.stat().st_mtime > t
-               for s in (HERE / "rwkv7.c", HERE / "rwkv7.h"))
+               for s in (HERE / "rwkv7.c", HERE / "rwkv7.h", HERE / "quant.c"))
 
 
 _lib = None

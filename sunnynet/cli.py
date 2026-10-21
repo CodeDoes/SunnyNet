@@ -144,10 +144,12 @@ def _main_gguf_c(args) -> int:
     from .runtime.rwkv7 import RWKV7
     from .runtime.rwkv7_c import SnRWKV7
 
-    blob = Path(args.blob) if args.blob else Path(args.gguf).with_suffix(".runtime.bin")
+    blob = Path(args.blob) if args.blob else Path(args.gguf).with_suffix(
+        ".q4.bin" if args.quant == "int4" else ".runtime.bin")
     if not blob.exists():
         raise SystemExit(f"缺少权重 blob: {blob}\n先运行: python -X utf8 "
-                         f"experiments/_export_rwkv7.py {args.gguf} {blob}")
+                         f"experiments/_export_rwkv7.py {args.gguf} {blob}"
+                         + ("" if args.quant == "fp32" else " (INT4 需不带 --f32)"))
     t0 = time.perf_counter()
     tk = RWKV7(args.gguf)
     m = SnRWKV7(blob, tk.vocab)
@@ -223,6 +225,8 @@ def main(argv=None):
     ap.add_argument("--gguf-backend", choices=["numpy", "c"], default="numpy",
                     help="--gguf 时的执行后端; c = C 内核整模型单步")
     ap.add_argument("--blob", default=None, help="--backend c 的权重 blob 路径")
+    ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
+                    help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     args = ap.parse_args(argv)

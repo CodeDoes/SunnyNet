@@ -1,11 +1,12 @@
 /* SunnyNet Runtime: RWKV-7 单步解码, 整模型在 C (AVX2/FMA).
  *
- * 权重矩阵一律按 gemv 约定存 (in,out) 行主序: y = Wt^T x.
+ * 权重矩阵按 gemv 约定存 (in,out) 行主序: y = Wt^T x; 或 INT4 量化存 (out,in).
  * 状态 S 逐 head (HS,HS); rank-1 校正项与衰减项共用更新前的 S.
- * w 的 LoRA 中间夹 tanh, 不可折叠; a/v 可折但为统一起见也保留分解.
+ * w 的 LoRA 中间夹 tanh, 不可折叠; a/v 无夹层但保留分解.
  * 单线程: B=1 单序列, 张量太小, 起线程的唤醒开销大于收益.
  */
 #include "rwkv7.h"
+#include "quant.h"
 
 #include <immintrin.h>
 #include <math.h>
@@ -28,9 +29,18 @@ static FILE* sn_fopen(const char* path, const char* mode) {
 #endif
 
 #define SN_RK_MAGIC 0x4B57524B /* "KRWK" */
-#define SN_RK_VERSION 2
+#define SN_RK_VERSION 3
 #define SN_R2 0.6065306597126334f /* 1/sqrt(e) */
 #define SN_EPS_GROUP 6.4e-4f
+#define SN_Q4_BLOCK 64
+
+/* fp32 (in,out) 或 INT4 (out,in) 的权重矩阵. */
+typedef struct {
+    int is_q4, in, out;
+    const float* w;             /* fp32: (in,out) */
+    const unsigned char* q;     /* INT4: (out, in/2) */
+    const float* scale;         /* INT4: (out, in/64) */
+} Wmat;
 
 struct SnRWKV7;
 
@@ -38,30 +48,29 @@ typedef struct {
     int D, HS, NH, F, Rw, Ra, Rv, Rg;
     const float *ln1w, *ln1b, *ln2w, *ln2b;
     const float* lerp;              /* (6,D) */
-    const float *rw, *kw, *vw, *ow; /* (D,D) */
-    const float *w1, *w2, *a1, *a2, *v1, *v2, *g1, *g2;
+    Wmat rw, kw, vw, ow;            /* (D,D) */
+    Wmat w1, w2, a1, a2, v1, v2, g1, g2;
+    Wmat cmk, cmv;
     const float *w0, *a0, *v0;
     const float *kk_w, *ka_w, *rk_w;
     const float *lnx_w, *lnx_b;
-    const float* cmk;               /* (D,F) */
-    const float* cmv;               /* (F,D) */
     const float* cmk_lerp;
     float* S;                       /* (NH,HS,HS) */
     float* shift;                   /* (2,D) */
-    int first;                      /* layer 0: 记录 v_first 而不混合 */
+    int first;
     struct SnRWKV7* m;
 } SnLayer;
 
 struct SnRWKV7 {
-    int vocab, D, HS, NH, F, L;
+    int vocab, D, HS, NH, F, L, is_q4;
     float eps, eps_group;
-    float* wbuf;
+    unsigned char* wbuf;
     SnLayer* layers;
     const float *en_w, *en_b, *on_w, *on_b;
     const float* embed;   /* (vocab,D) */
-    const float* head_t;  /* (D,vocab) */
-    float* sc;            /* 逐层工作区 */
-    float* top;           /* (3D): x, nrm, vfirst */
+    Wmat head;            /* (D,vocab) */
+    float* sc;
+    float* top;
     int ready;
 };
 
@@ -76,12 +85,10 @@ static inline float hsum256(__m256 v) {
 
 static inline float sgn(float x) { return 1.0f / (1.0f + expf(-x)); }
 
-/* 处理输出列区间 [j0, j0+jn), Wt 存 (in,out). */
-static void gemv_blk(float* y, const float* x, const float* Wt, int in, int out,
-                     int j0, int jn) {
-    const int end = j0 + jn;
-    int j = j0;
-    for (; j + 32 <= end; j += 32) {
+/* y = Wt^T x, Wt 存 (in,out). */
+static void gemv(float* y, const float* x, const float* Wt, int in, int out) {
+    int j = 0;
+    for (; j + 32 <= out; j += 32) {
         __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
         __m256 a2 = _mm256_setzero_ps(), a3 = _mm256_setzero_ps();
         for (int i = 0; i < in; ++i) {
@@ -97,7 +104,7 @@ static void gemv_blk(float* y, const float* x, const float* Wt, int in, int out,
         _mm256_storeu_ps(y + j + 16, a2);
         _mm256_storeu_ps(y + j + 24, a3);
     }
-    for (; j + 8 <= end; j += 8) {
+    for (; j + 8 <= out; j += 8) {
         __m256 acc = _mm256_setzero_ps();
         for (int i = 0; i < in; ++i) {
             const __m256 b = _mm256_set1_ps(x[i]);
@@ -105,7 +112,7 @@ static void gemv_blk(float* y, const float* x, const float* Wt, int in, int out,
         }
         _mm256_storeu_ps(y + j, acc);
     }
-    for (; j < end; ++j) {
+    for (; j < out; ++j) {
         float acc = 0.0f;
         const float* row = Wt + j;
         for (int i = 0; i < in; ++i) acc += x[i] * row[(size_t)i * out];
@@ -113,19 +120,9 @@ static void gemv_blk(float* y, const float* x, const float* Wt, int in, int out,
     }
 }
 
-/* y = Wt^T x. 输出列数大时按列分块并行, 每列求和顺序不变 => 逐位一致. */
-static void gemv(float* y, const float* x, const float* Wt, int in, int out) {
-    if (out >= 2048 && in >= 256) {
-        const int nb = (out + 255) / 256;
-        #pragma omp parallel for schedule(static)
-        for (int b = 0; b < nb; ++b) {
-            const int j0 = b * 256;
-            const int jn = (j0 + 256 <= out) ? 256 : out - j0;
-            gemv_blk(y, x, Wt, in, out, j0, jn);
-        }
-    } else {
-        gemv_blk(y, x, Wt, in, out, 0, out);
-    }
+static void wmat_mul(float* y, const float* x, const Wmat* M) {
+    if (M->is_q4) sn_gemv_i4(y, x, M->q, M->scale, M->in, M->out, SN_Q4_BLOCK);
+    else gemv(y, x, M->w, M->in, M->out);
 }
 
 static void layernorm(float* y, const float* x, const float* g, const float* c,
@@ -209,7 +206,7 @@ static void rk_layer(SnLayer* L, float* x, float* vfirst, float* dbg) {
     float* y = ww + D;
     float* xn2 = y + D;
     float* xk2 = xn2 + D;
-    float* lo = xk2 + D;      /* 256: LoRA 中间量 (最大 Rg) */
+    float* lo = xk2 + D;      /* 256: LoRA 中间量 */
     float* ck = lo + 256;
     float* cksq = ck + F;
 
@@ -228,14 +225,14 @@ static void rk_layer(SnLayer* L, float* x, float* vfirst, float* dbg) {
         }
     }
 
-    gemv(r, xr, L->rw, D, D);
-    gemv(k, xk, L->kw, D, D);
-    gemv(v, xv, L->vw, D, D);
+    wmat_mul(r, xr, &L->rw);
+    wmat_mul(k, xk, &L->kw);
+    wmat_mul(v, xv, &L->vw);
 
     /* ww = exp(-sigmoid(tanh(xw W1) W2 + w0) / sqrt(e)) */
-    gemv(lo, xw, L->w1, D, Rw);
+    wmat_mul(lo, xw, &L->w1);
     for (int i = 0; i < Rw; ++i) lo[i] = tanhf(lo[i]);
-    gemv(dd, lo, L->w2, Rw, D);
+    wmat_mul(dd, lo, &L->w2);
     for (int i = 0; i < D; ++i)
         ww[i] = expf(-sgn(dd[i] + L->w0[i]) * SN_R2);
 
@@ -243,8 +240,8 @@ static void rk_layer(SnLayer* L, float* x, float* vfirst, float* dbg) {
     if (L->first) {
         memcpy(vfirst, v, sizeof(float) * D);
     } else {
-        gemv(lo, xv, L->v1, D, Rv);
-        gemv(dd, lo, L->v2, Rv, D);
+        wmat_mul(lo, xv, &L->v1);
+        wmat_mul(dd, lo, &L->v2);
         for (int i = 0; i < D; ++i) {
             const float mix = sgn(dd[i] + L->v0[i]);
             v[i] += (vfirst[i] - v[i]) * mix;
@@ -252,14 +249,14 @@ static void rk_layer(SnLayer* L, float* x, float* vfirst, float* dbg) {
     }
 
     /* a = sigmoid(xa A1 A2 + a0) */
-    gemv(lo, xa, L->a1, D, Ra);
-    gemv(dd, lo, L->a2, Ra, D);
+    wmat_mul(lo, xa, &L->a1);
+    wmat_mul(dd, lo, &L->a2);
     for (int i = 0; i < D; ++i) a[i] = sgn(dd[i] + L->a0[i]);
 
     /* g = sigmoid(xg G1) G2 */
-    gemv(lo, xg, L->g1, D, Rg);
+    wmat_mul(lo, xg, &L->g1);
     for (int i = 0; i < Rg; ++i) lo[i] = sgn(lo[i]);
-    gemv(g, lo, L->g2, Rg, D);
+    wmat_mul(g, lo, &L->g2);
 
     for (int i = 0; i < D; ++i) {
         kk[i] = k[i] * L->kk_w[i];
@@ -291,20 +288,20 @@ static void rk_layer(SnLayer* L, float* x, float* vfirst, float* dbg) {
         }
     }
 
-    gemv(dd, y, L->ow, D, D);
+    wmat_mul(dd, y, &L->ow);
     for (int i = 0; i < D; ++i) x[i] += dd[i];
     memcpy(L->shift, xn, sizeof(float) * D);
 
     layernorm(xn2, x, L->ln2w, L->ln2b, D, m->eps);
     for (int i = 0; i < D; ++i)
         xk2[i] = xn2[i] + L->cmk_lerp[i] * (L->shift[D + i] - xn2[i]);
-    gemv(ck, xk2, L->cmk, D, F);
+    wmat_mul(ck, xk2, &L->cmk);
     for (int i = 0; i < F; ++i) {
         const float t = ck[i] > 0.0f ? ck[i] : 0.0f;
         ck[i] = t;
         cksq[i] = t * t;
     }
-    gemv(dd, cksq, L->cmv, F, D);
+    wmat_mul(dd, cksq, &L->cmv);
     for (int i = 0; i < D; ++i) x[i] += dd[i];
     memcpy(L->shift + D, xn2, sizeof(float) * D);
 
@@ -357,9 +354,9 @@ void sn_rk_step(SnRWKV7* m, int token, float* logits) {
     memcpy(x, m->embed + (size_t)token * D, sizeof(float) * D);
     layernorm(x, x, m->en_w, m->en_b, D, m->eps);
     for (int l = 0; l < m->L; ++l)
-        rk_layer(&m->layers[l], x, l == 0 ? vfirst : vfirst, NULL);
+        rk_layer(&m->layers[l], x, vfirst, NULL);
     layernorm(nrm, x, m->on_w, m->on_b, D, m->eps);
-    gemv(logits, nrm, m->head_t, D, m->vocab);
+    wmat_mul(logits, nrm, &m->head);
 }
 
 void sn_rk_prefill(SnRWKV7* m, const int* tokens, int n, float* logits) {
@@ -376,6 +373,41 @@ void sn_rk_dbg(SnRWKV7* m, int token, int layer, float* out) {
         rk_layer(&m->layers[l], x, vfirst, l == layer ? out : NULL);
 }
 
+/* ---------------------------------------------------------------- 加载 */
+
+typedef struct { const unsigned char* p; } Cur;
+
+static void take_wmat(Cur* c, Wmat* M, int in, int out) {
+    int tag;
+    memcpy(&tag, c->p, sizeof(int));
+    c->p += sizeof(int);
+    M->in = in;
+    M->out = out;
+    M->w = NULL;
+    M->q = NULL;
+    M->scale = NULL;
+    if (tag == 1) {
+        const size_t qb = (size_t)out * (size_t)(in / 2);
+        const size_t sb = (size_t)out * (size_t)(in / SN_Q4_BLOCK) * sizeof(float);
+        M->is_q4 = 1;
+        M->q = c->p;
+        c->p += qb;
+        M->scale = (const float*)c->p;
+        c->p += sb;
+    } else {
+        M->is_q4 = 0;
+        M->w = (const float*)c->p;
+        c->p += (size_t)in * out * sizeof(float);
+    }
+}
+
+static const float* take_f32(Cur* c, size_t n) {
+    c->p += sizeof(int);   /* 标签, f32 恒为 0 */
+    const float* r = (const float*)c->p;
+    c->p += n * sizeof(float);
+    return r;
+}
+
 static int rd_i32(FILE* f, int32_t* o, int n) {
     return (int)fread(o, sizeof(int32_t), (size_t)n, f) == n;
 }
@@ -389,81 +421,76 @@ SnRWKV7* sn_rk_load(const char* path) {
         return NULL;
     }
     const int L = h[2], D = h[3], HS = h[4], NH = h[5], F = h[6], vocab = h[8];
+    const int file_q4 = h[9];
     float hf[1];
     if (fread(hf, sizeof(float), 1, f) != 1) { fclose(f); return NULL; }
 
+    int* ranks = (int*)malloc(sizeof(int) * (size_t)4 * L);
+    if (!ranks || !rd_i32(f, ranks, 4 * L)) { free(ranks); fclose(f); return NULL; }
+
+    /* 余下全部载荷一次读入, 之后在内存里按标志游标解析. */
+    const long pos = ftell(f);
+    if (fseek(f, 0, SEEK_END) != 0) { free(ranks); fclose(f); return NULL; }
+    const long end = ftell(f);
+    const size_t nbytes = (size_t)(end - pos);
+    unsigned char* buf = (unsigned char*)malloc(nbytes);
+    if (!buf) { free(ranks); fclose(f); return NULL; }
+    fseek(f, pos, SEEK_SET);
+    if (fread(buf, 1, nbytes, f) != nbytes) { free(buf); free(ranks); fclose(f); return NULL; }
+    fclose(f);
+
     SnRWKV7* m = (SnRWKV7*)calloc(1, sizeof(SnRWKV7));
-    if (!m) { fclose(f); return NULL; }
+    m->layers = (SnLayer*)calloc((size_t)L, sizeof(SnLayer));
+    if (!m || !m->layers) { free(buf); free(ranks); free(m); return NULL; }
     m->L = L; m->D = D; m->HS = HS; m->NH = NH; m->F = F; m->vocab = vocab;
     m->eps = hf[0];
     m->eps_group = SN_EPS_GROUP;
+    m->is_q4 = file_q4;
+    m->wbuf = buf;
 
-    int* ranks = (int*)malloc(sizeof(int) * (size_t)4 * L);
-    m->layers = (SnLayer*)calloc((size_t)L, sizeof(SnLayer));
-    if (!ranks || !m->layers) { free(ranks); sn_rk_free(m); fclose(f); return NULL; }
-    if (!rd_i32(f, ranks, 4 * L)) { free(ranks); sn_rk_free(m); fclose(f); return NULL; }
-
-    size_t per_layer = (size_t)19 * D + (size_t)4 * D * D + (size_t)2 * D * F;
-    for (int l = 0; l < L; ++l)
-        per_layer += (size_t)2 * D * (ranks[4 * l] + ranks[4 * l + 1] +
-                                      ranks[4 * l + 2] + ranks[4 * l + 3]);
-    const size_t total = (size_t)L * per_layer + 4 * (size_t)D +
-                         (size_t)vocab * D + (size_t)D * vocab;
-    m->wbuf = (float*)malloc(sizeof(float) * total);
-    if (!m->wbuf) { free(ranks); sn_rk_free(m); fclose(f); return NULL; }
-
-    float* p = m->wbuf;
+    Cur c = { buf };
     for (int l = 0; l < L; ++l) {
         SnLayer* A = &m->layers[l];
         A->m = m;
-        A->D = D; A->HS = HS; A->NH = NH; A->F = F;
-        A->first = (l == 0);
+        A->D = D; A->HS = HS; A->NH = NH; A->F = F; A->first = (l == 0);
         A->Rw = ranks[4 * l]; A->Ra = ranks[4 * l + 1];
         A->Rv = ranks[4 * l + 2]; A->Rg = ranks[4 * l + 3];
-        A->ln1w = p; p += D;
-        A->ln1b = p; p += D;
-        A->ln2w = p; p += D;
-        A->ln2b = p; p += D;
-        A->lerp = p; p += (size_t)6 * D;
-        A->rw = p; p += (size_t)D * D;
-        A->kw = p; p += (size_t)D * D;
-        A->vw = p; p += (size_t)D * D;
-        A->ow = p; p += (size_t)D * D;
-        A->w1 = p; p += (size_t)D * A->Rw;
-        A->w2 = p; p += (size_t)A->Rw * D;
-        A->a1 = p; p += (size_t)D * A->Ra;
-        A->a2 = p; p += (size_t)A->Ra * D;
-        A->v1 = p; p += (size_t)D * A->Rv;
-        A->v2 = p; p += (size_t)A->Rv * D;
-        A->g1 = p; p += (size_t)D * A->Rg;
-        A->g2 = p; p += (size_t)A->Rg * D;
-        A->w0 = p; p += D;
-        A->a0 = p; p += D;
-        A->v0 = p; p += D;
-        A->kk_w = p; p += D;
-        A->ka_w = p; p += D;
-        A->rk_w = p; p += D;
-        A->lnx_w = p; p += D;
-        A->lnx_b = p; p += D;
-        A->cmk = p; p += (size_t)D * F;
-        A->cmv = p; p += (size_t)F * D;
-        A->cmk_lerp = p; p += D;
+        A->ln1w = take_f32(&c, D);
+        A->ln1b = take_f32(&c, D);
+        A->ln2w = take_f32(&c, D);
+        A->ln2b = take_f32(&c, D);
+        A->lerp = take_f32(&c, (size_t)6 * D);
+        take_wmat(&c, &A->rw, D, D);
+        take_wmat(&c, &A->kw, D, D);
+        take_wmat(&c, &A->vw, D, D);
+        take_wmat(&c, &A->ow, D, D);
+        take_wmat(&c, &A->w1, D, A->Rw);
+        take_wmat(&c, &A->w2, A->Rw, D);
+        take_wmat(&c, &A->a1, D, A->Ra);
+        take_wmat(&c, &A->a2, A->Ra, D);
+        take_wmat(&c, &A->v1, D, A->Rv);
+        take_wmat(&c, &A->v2, A->Rv, D);
+        take_wmat(&c, &A->g1, D, A->Rg);
+        take_wmat(&c, &A->g2, A->Rg, D);
+        A->w0 = take_f32(&c, D);
+        A->a0 = take_f32(&c, D);
+        A->v0 = take_f32(&c, D);
+        A->kk_w = take_f32(&c, D);
+        A->ka_w = take_f32(&c, D);
+        A->rk_w = take_f32(&c, D);
+        A->lnx_w = take_f32(&c, D);
+        A->lnx_b = take_f32(&c, D);
+        take_wmat(&c, &A->cmk, D, F);
+        take_wmat(&c, &A->cmv, F, D);
+        A->cmk_lerp = take_f32(&c, D);
     }
-    float* en_w = p; p += D;
-    float* en_b = p; p += D;
-    float* on_w = p; p += D;
-    float* on_b = p; p += D;
-    float* embed = p; p += (size_t)vocab * D;
-    float* head_t = p; p += (size_t)D * vocab;
-
-    if (fread(m->wbuf, sizeof(float), (size_t)(p - m->wbuf), f) != (size_t)(p - m->wbuf)) {
-        free(ranks); sn_rk_free(m); fclose(f); return NULL;
-    }
-    fclose(f);
+    m->en_w = take_f32(&c, D);
+    m->en_b = take_f32(&c, D);
+    m->on_w = take_f32(&c, D);
+    m->on_b = take_f32(&c, D);
+    m->embed = take_f32(&c, (size_t)vocab * D);
+    take_wmat(&c, &m->head, D, vocab);
     free(ranks);
-
-    m->en_w = en_w; m->en_b = en_b; m->on_w = on_w; m->on_b = on_b;
-    m->embed = embed; m->head_t = head_t;
 
     for (int l = 0; l < L; ++l) {
         SnLayer* A = &m->layers[l];

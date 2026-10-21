@@ -1,0 +1,37 @@
+{
+  "note": "INT4 vs fp32 同 prompt 贪心对比; 无本项目验证集, 不作 ppl 陈述",
+  "rows": [
+    {
+      "tag": "en_fact",
+      "prompt": "The Eiffel Tower is located in the city of",
+      "logits_max_abs_diff": 27.63072967529297,
+      "argmax_agree_over_len": "16/35",
+      "fp32_text": "The Eiffel Tower is located in the city of Paris, France. It is the tallest building in the world and is the world's tallest structure. It was",
+      "int4_text": "The Eiffel Tower is located in the city of Paris, France.\nThe Eiffel Tower is a world famous landmark in Paris, France. It is a tower"
+    },
+    {
+      "tag": "en_math",
+      "prompt": "Water is composed of hydrogen and",
+      "logits_max_abs_diff": 27.441280364990234,
+      "argmax_agree_over_len": "7/30",
+      "fp32_text": "Water is composed of hydrogen and oxygen.\nThe hydrogen is the most abundant element in the universe. It is found in the stars and in the gas",
+      "int4_text": "Water is composed of hydrogen and oxygen, and is a colorless, odorless, and tasteless gas.\nThe hydrogen molecule is a very simple"
+    },
+    {
+      "tag": "zh_fact",
+      "prompt": "中国的首都是",
+      "logits_max_abs_diff": 23.474857330322266,
+      "argmax_agree_over_len": "6/30",
+      "fp32_text": "中国的首都是在北京，而北京是在中国的首都，这是一个非常重要的",
+      "int4_text": "中国的首都是一个国家，而且国家的人口也不多，而且国家的人口也"
+    },
+    {
+      "tag": "code",
+      "prompt": "def fibonacci(n):\n    if n < 2:\n        return n\n    return",
+      "logits_max_abs_diff": 30.623737335205078,
+      "argmax_agree_over_len": "17/41",
+      "fp32_text": "def fibonacci(n):\n    if n < 2:\n        return n\n    return fibonacci(n-1) + fibonacci(n-2)\n\ndef fibonacci_sum(n):",
+      "int4_text": "def fibonacci(n):\n    if n < 2:\n        return n\n    return n + fibonacci(n - 2)\n\n\nprint(fibonacci(2))\n<s><gh_stars>"
+    }
+  ]
+}
