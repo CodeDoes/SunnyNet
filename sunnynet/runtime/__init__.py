@@ -1,0 +1,147 @@
+"""SunnyNet Runtime: 与 PyTorch 解耦的独立 C 推理内核 (AVX2/FMA + OpenMP).
+
+只依赖 ctypes 与 C 编译器, 不依赖 torch。递推形式:
+    s_t = a_t * s_{t-1} + b_t          逐通道独立 (SN_FMA)
+    s_t = a_t * s_{t-1} + (1-a_t)*u_t  门控形式   (SN_GATED)
+"""
+from __future__ import annotations
+
+import ctypes
+import subprocess
+from pathlib import Path
+
+__all__ = [
+    "runtime_available", "load_runtime", "FMA", "GATED",
+    "scan", "scan_bwd", "step", "quant_i8", "dequant_i8", "TOOLCHAIN_HINT",
+]
+
+FMA = 0
+GATED = 1
+
+HERE = Path(__file__).resolve().parent
+SRC = HERE / "recur.c"
+BUILD = HERE / "_build"
+DLL = BUILD / "sunnynet_runtime.dll"
+
+TOOLCHAIN_HINT = (
+    "未找到 C 编译器。设置环境变量 SUNNY_W64 指向 w64devkit 根目录, 例如:\n"
+    "  set SUNNY_W64=<w64devkit 解压目录>\n"
+    "或把 gcc 加入 PATH。"
+)
+
+_lib = None
+
+
+def _find_gcc() -> str | None:
+    from shutil import which
+    env = __import__("os").environ.get("SUNNY_W64")
+    if env:
+        for name in ("gcc.exe", "gcc"):
+            c = Path(env) / "bin" / name
+            if c.exists():
+                return str(c)
+    return which("gcc")
+
+
+def runtime_available() -> bool:
+    return _find_gcc() is not None
+
+
+def _compile(gcc: str) -> None:
+    BUILD.mkdir(parents=True, exist_ok=True)
+    cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
+           "-funroll-loops", "-fopenmp", "-static", "-shared", "-std=c11"]
+    cmd += [str(HERE / "recur.c"), "-o", str(DLL)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "")[-800:]
+        raise RuntimeError(f"runtime 编译失败: {tail}")
+
+
+def _needs_rebuild() -> bool:
+    if not DLL.exists():
+        return True
+    dll_t = DLL.stat().st_mtime
+    return any(s.stat().st_mtime > dll_t
+               for s in (SRC, HERE / "recur.h"))
+
+
+def load_runtime(force_rebuild: bool = False):
+    global _lib
+    if _lib is not None and not force_rebuild:
+        return _lib
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError(TOOLCHAIN_HINT)
+    if force_rebuild or _needs_rebuild():
+        _compile(gcc)
+    lib = ctypes.CDLL(str(DLL))
+    V, I = ctypes.c_void_p, ctypes.c_int
+    lib.sn_set_threads.argtypes = [I]
+    lib.sn_threads.restype = I
+    lib.sn_recur_scan.argtypes = [V, V, V, V, V, I, I, I, I]
+    lib.sn_recur_bwd.argtypes = [V, V, V, V, V, V, V, V, I, I, I, I]
+    lib.sn_recur_step.argtypes = [V, V, V, I, I, I]
+    lib.sn_quant_i8.argtypes = [V, V, V, I, I, I]
+    lib.sn_dequant_i8.argtypes = [V, V, V, I, I, I]
+    _lib = lib
+    return lib
+
+
+def _ptr(t):
+    return ctypes.c_void_p(t.data_ptr())
+
+
+def scan(a, b, s0, gated=False):
+    """a, b: (B,T,N); s0: (B,N) -> (out (B,T,N), send (B,N))"""
+    import torch
+    lib = load_runtime()
+    B, T, N = a.shape
+    out = torch.empty_like(a)
+    send = torch.empty_like(s0)
+    lib.sn_recur_scan(_ptr(a), _ptr(b), _ptr(s0), _ptr(out), _ptr(send),
+                      B, T, N, GATED if gated else FMA)
+    return out, send
+
+
+def scan_bwd(a, b, s0, out, dout, gated=False):
+    """-> (da, db, ds0)"""
+    import torch
+    lib = load_runtime()
+    B, T, N = a.shape
+    da = torch.empty_like(a)
+    db = torch.empty_like(b)
+    ds0 = torch.empty_like(s0)
+    lib.sn_recur_bwd(_ptr(a), _ptr(b), _ptr(s0), _ptr(out), _ptr(dout),
+                     _ptr(da), _ptr(db), _ptr(ds0),
+                     B, T, N, GATED if gated else FMA)
+    return da, db, ds0
+
+
+def step(a, b, s, gated=False):
+    """a, b, s: (B,N); s 原地更新。"""
+    lib = load_runtime()
+    B, N = a.shape
+    lib.sn_recur_step(_ptr(a), _ptr(b), _ptr(s), B, N, GATED if gated else FMA)
+    return s
+
+
+def quant_i8(x, block: int = 0):
+    """x: (B,N) fp32 -> (q int8 (B,N), scale (B,nb) fp32)"""
+    import torch
+    lib = load_runtime()
+    B, N = x.shape
+    nb = (N + block - 1) // block if block > 0 else 1
+    q = torch.empty((B, N), dtype=torch.int8)
+    scale = torch.empty((B, nb), dtype=torch.float32)
+    lib.sn_quant_i8(_ptr(x), _ptr(q), _ptr(scale), B, N, block)
+    return q, scale
+
+
+def dequant_i8(q, scale, block: int = 0):
+    import torch
+    lib = load_runtime()
+    B, N = q.shape
+    x = torch.empty((B, N), dtype=torch.float32)
+    lib.sn_dequant_i8(_ptr(q), _ptr(scale), _ptr(x), B, N, block)
+    return x

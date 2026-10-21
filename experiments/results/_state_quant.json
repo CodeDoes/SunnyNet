@@ -1,0 +1,91 @@
+{
+  "recursive": [
+    {
+      "T": 2048,
+      "block": 0,
+      "mode": "bounded",
+      "quant_mode": "once",
+      "D": 128,
+      "absmax_first": 1.772927165031433,
+      "absmax_last": 1.8825877904891968,
+      "absmax_drift": 1.061852865487466,
+      "err_final": 0.007378913462162018,
+      "err_ratio": 0.0039195587581307865,
+      "used_bits": 8
+    },
+    {
+      "T": 2048,
+      "block": 0,
+      "mode": "unbounded",
+      "quant_mode": "once",
+      "D": 128,
+      "absmax_first": 466.8451843261719,
+      "absmax_last": 3708.716064453125,
+      "absmax_drift": 7.944209748690365,
+      "err_final": 14.51739501953125,
+      "err_ratio": 0.003914399152492667,
+      "used_bits": 8
+    },
+    {
+      "T": 2048,
+      "block": 32,
+      "mode": "bounded",
+      "quant_mode": "once",
+      "D": 128,
+      "absmax_first": 1.772927165031433,
+      "absmax_last": 1.8825877904891968,
+      "absmax_drift": 1.061852865487466,
+      "err_final": 0.006661117076873779,
+      "err_ratio": 0.0035382769985684787,
+      "used_bits": 8
+    },
+    {
+      "T": 2048,
+      "block": 0,
+      "mode": "bounded",
+      "quant_mode": "every",
+      "D": 128,
+      "absmax_first": 1.772927165031433,
+      "absmax_last": 1.8825877904891968,
+      "absmax_drift": 1.061852865487466,
+      "err_final": 0.917040228843689,
+      "err_ratio": 0.48711684707430986,
+      "used_bits": 8
+    },
+    {
+      "T": 2048,
+      "block": 0,
+      "mode": "unbounded",
+      "quant_mode": "every",
+      "D": 128,
+      "absmax_first": 466.8451843261719,
+      "absmax_last": 3708.716064453125,
+      "absmax_drift": 7.944209748690365,
+      "err_final": 280.93212890625,
+      "err_ratio": 0.07574916063240753,
+      "used_bits": 8
+    }
+  ],
+  "fixed_scale": [
+    {
+      "T": 2048,
+      "mode": "bounded",
+      "D": 128,
+      "scale_from_half": 0.014225494204543707,
+      "absmax_end": 1.8825877904891968,
+      "overflow_ch": 1,
+      "overflow_ratio": 0.0078125,
+      "rel_err": 0.04034341819055893
+    },
+    {
+      "T": 2048,
+      "mode": "unbounded",
+      "D": 128,
+      "scale_from_half": 14.602305494894193,
+      "absmax_end": 3708.716064453125,
+      "overflow_ch": 7,
+      "overflow_ratio": 0.0546875,
+      "rel_err": 0.4999636624582044
+    }
+  ]
+}

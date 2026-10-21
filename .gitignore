@@ -44,3 +44,4 @@ docs/DISCUSSIONS_*.md
 
 # 手写内核编译产物 (由 sunnynet.kernels 自动重建)
 sunnynet/kernels/_build/
+sunnynet/runtime/_build/

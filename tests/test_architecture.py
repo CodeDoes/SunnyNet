@@ -865,3 +865,91 @@ def test_step_kernel_matches_forward_equivalence():
     finally:
         ca.set_kernel_active(False)
     assert float((step - full).abs().max()) < 1e-5
+
+
+# ---------------------------------------------------------------- 通用递推 Runtime
+def test_runtime_scan_matches_fp64_reference():
+    """通用递推内核与 fp64 逐步递推一致 (FMA 与 GATED 两种形式)."""
+    from sunnynet.runtime import runtime_available, scan
+    if not runtime_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    torch.manual_seed(21)
+    B, T, N = 3, 128, 96
+    a = torch.rand(B, T, N) * 0.8 + 0.1
+    b = torch.randn(B, T, N)
+    s0 = torch.zeros(B, N)
+
+    def ref(gated):
+        A, bb = a.double(), b.double()
+        s = s0.double()
+        out = []
+        for t in range(T):
+            bt = (1.0 - A[:, t]) * bb[:, t] if gated else bb[:, t]
+            s = A[:, t] * s + bt
+            out.append(s)
+        return torch.stack(out, 1).float(), s.float()
+
+    for gated in (False, True):
+        o_ref, e_ref = ref(gated)
+        o_k, e_k = scan(a, b, s0, gated=gated)
+        assert float((o_k - o_ref).abs().max()) < 1e-5
+        assert float((e_k - e_ref).abs().max()) < 1e-5
+
+
+def test_runtime_step_equals_scan():
+    """内核单步逐步解码与整段扫描一致 (单步接口的语义保证)."""
+    from sunnynet.runtime import runtime_available, scan, step
+    if not runtime_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    torch.manual_seed(22)
+    B, T, N = 2, 96, 64
+    a = torch.rand(B, T, N) * 0.6 + 0.3
+    b = torch.randn(B, T, N)
+    s0 = torch.zeros(B, N)
+    o_scan, _ = scan(a, b, s0, gated=True)
+    s = s0.clone()
+    outs = []
+    for t in range(T):
+        outs.append(step(a[:, t].contiguous(), b[:, t].contiguous(), s, gated=True).clone())
+    o_step = torch.stack(outs, 1)
+    assert float((o_step - o_scan).abs().max()) < 1e-5
+
+
+def test_runtime_scan_bwd_matches_autograd():
+    """内核反向与 autograd 一致 (da / db / ds0)."""
+    from sunnynet.runtime import runtime_available, scan_bwd
+    if not runtime_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    torch.manual_seed(23)
+    B, T, N = 2, 64, 48
+    a = (torch.rand(B, T, N) * 0.8 + 0.1).requires_grad_(True)
+    b = torch.randn(B, T, N).requires_grad_(True)
+    s0 = torch.zeros(B, N, requires_grad=True)
+    s = s0.clone()
+    store = []
+    for t in range(T):
+        s = a[:, t] * s + b[:, t]
+        store.append(s)
+    out = torch.stack(store, 1)
+    w = torch.randn_like(out)
+    (out * w).sum().backward()
+    with torch.no_grad():
+        da, db, ds0 = scan_bwd(a.detach(), b.detach(), s0.detach(),
+                               out.detach(), w, gated=False)
+    assert float((da - a.grad).abs().max()) < 1e-5
+    assert float((db - b.grad).abs().max()) < 1e-5
+    assert float((ds0 - s0.grad).abs().max()) < 1e-5
+
+
+def test_runtime_quant_int8_bounded_state():
+    """有界递推状态的 INT8 量化相对误差落在标度精度量级."""
+    from sunnynet.runtime import runtime_available, quant_i8, dequant_i8
+    if not runtime_available():
+        pytest.skip("本机无 C 编译器 (设 SUNNY_W64 指向 w64devkit)")
+    torch.manual_seed(24)
+    x = torch.randn(2, 128) * 1.5
+    q, sc = quant_i8(x, 0)
+    back = dequant_i8(q, sc, 0)
+    # 对称 INT8 单块: 步长为 max|x|/127, 舍入误差不超过半个步长
+    step_size = float(x.abs().max()) / 127.0
+    assert float((back - x).abs().max()) <= step_size * 0.51

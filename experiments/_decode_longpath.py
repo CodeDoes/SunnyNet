@@ -58,7 +58,7 @@ def reps_for(T: int) -> int:
 def cell(name: str, T: int, thr: int = 1) -> float:
     code = CELL.format(root=str(ROOT), T=T, name=name, thr=thr,
                        reps=reps_for(T), spec=repr(SPEC))
-    env = dict(os.environ); env["SUNNY_W64"] = env.get("SUNNY_W64", r"F:\devtools\w64devkit")
+    env = dict(os.environ)
     r = subprocess.run([PY, "-X", "utf8", "-c", code], capture_output=True, text=True,
                        encoding="utf-8", cwd=str(ROOT), env=env)
     for ln in r.stdout.splitlines():

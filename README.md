@@ -1,5 +1,76 @@
 # SunnyNet
 
+**English** · [中文](#中文简介)
+
+An original general-purpose sequence architecture, not derived from Transformer, RNN, Mamba, CNN, or any existing design.
+
+Repository: <https://github.com/SunnyClaw-cx/SunnyNet>
+
+Built for CPU training: O(N) sequence complexity with a fixed-size rolling state, no token-to-token interaction, and no materialized activations across the sequence.
+
+Licensed under Apache License 2.0.
+
+---
+
+## English Overview
+
+### What it is
+
+SunnyNet is built around a single recurrent primitive: a convex combination.
+
+```
+s_t = p_t ⊙ s_{t-1} + (1 - p_t) ⊙ u_t ,   p_t ∈ [1-δ_i, 1]
+```
+
+Both coefficients are non-negative and sum to one, so `|s_t| ≤ max(|s_{t-1}|, |u_t|)`. The state is bounded by construction and cannot diverge. Each channel's retention floor is tied to a memory span `H_i` laid out on a log scale over `[2, 8192]`, so one layer carries time scales from two tokens to eight thousand.
+
+The design targets the real CPU bottleneck — memory bandwidth and cache behavior — not FLOPs. It avoids dense matmul, keeps the state dimension fixed, and passes only the state across chunks.
+
+### Measured results
+
+All numbers are measured on one machine (i7-8750H, AVX2, PyTorch 2.14.1 CPU) with per-cell process isolation. Full data, including negative results, is in [docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md).
+
+| Metric | SunnyNet | Best peer | Setting |
+|---|---|---|---|
+| Training step, ms/token | 0.0953 | RWKV 0.0982 | T=256, batch 8, tied over 9 paired rounds |
+| Quality, ppl | 57.83 (2nd of 7) | H3 53.93 | 600 steps, single seed, not converged |
+| Decode, ms/step at T=4096 | 2.85 | RWKV 1.56 | B=1, single sequence |
+| Forward, ms/token at T=4096 | 0.0352 | Hyena 0.0184 | batch=1, pure forward |
+
+- Training step is statistically tied with RWKV (3–4 of 9 rounds faster, median paired ratio 1.042) and 16–41% faster than H3, Mamba, Hyena, and linear attention. The tie holds only at L=4; at L=6 the same parameter budget is 30–40% slower.
+- Long-context decoding: single-step cost stays flat from T=256 to T=4096 (3.28 → 2.85 ms), while a parameter-matched Transformer climbs 2.55 → 6.22 ms. SunnyNet is 2.18× faster at T=4096. Against O(N) peers it is not the fastest — RWKV decodes 1.9–2.6× faster at every length.
+- Forward pass: crossover with a matched Transformer at T≈384 (6-layer) or T≈600 (4-layer). At T=4096 it is 22.7× faster per token. Against O(N) peers there is no length where it leads all of them.
+- Cross-distribution: on independently collected external data, 1st of 7 on Chinese tech news, 2nd of 7 on English arXiv abstracts.
+- Hand-written AVX2 kernel (competitive gating, gate probability, and scan fused into one pass): 1.10–1.17× on the training step, bit-identical loss. Needs a C compiler (w64devkit / GCC).
+
+### Limitations
+
+- Short sequences are a structural weakness: below T≈384 (batch=1 forward) a standard Transformer is faster. The cause is operator count, not FLOPs.
+- No 0.5B quality number. On the 6 GB GPU available here, forward and a single SGD step run (5.0 GB peak); AdamW needs 7.6 GB and does not fit.
+- The scaling trend is not monotonic: 2nd at 1.4M, 1st at 20M, 2nd at 100M.
+- Long-range retrieval is verified only on structured text (code, far-bucket hit 0.13); on natural language it is near zero.
+- No GPU kernel. The architecture runs on CUDA unmodified (8.0–15.2× forward on a GTX 1060), but there is no Triton or CUDA implementation.
+- Decode speed is not competitive against O(N) peers: RWKV decodes 1.9–2.6× faster at every length tested.
+
+### CPU inference runtime
+
+`sunnynet/runtime/` is a standalone C kernel (AVX2/FMA + OpenMP) that has no Python or PyTorch dependency. It implements the general first-order recurrence
+
+```
+s_t = a_t * s_{t-1} + b_t              (FMA)
+s_t = a_t * s_{t-1} + (1 - a_t) * u_t  (gated)
+```
+
+RWKV's wkv, Mamba/S6 and H3 diagonal SSM, S4, linear-attention KV accumulation, and SunnyNet's rolling state all reduce to one of these two forms. Each is mapped to the kernel and checked elementwise against its own PyTorch recurrence (max diff 1.2e-07 to 1.9e-06). Against torch's vectorized block scan (`gated_scan`, cumsum closed form), the kernel is 9.90× faster at the median (3.56–19.29×, single thread, B=1, per-cell process isolation).
+
+The convex-combination state has a bounded magnitude by construction. Over T=2048 the state magnitude drifts 1.06× versus 7.94× for unbounded accumulation, and under a fixed INT8 scale the relative error is 4.0e-02 versus 5.0e-01.
+
+CLI: `python -m sunnynet.cli --ckpt runs/small.pt --prompt "..."`.
+
+---
+
+## 中文简介
+
 原创通用序列神经网络架构，不基于 Transformer、RNN、Mamba、CNN 等任何现有架构。
 
 仓库地址：<https://github.com/SunnyClaw-cx/SunnyNet>
@@ -17,6 +88,8 @@
 - [架构核心思想](#架构核心思想)
 - [原创组件](#原创组件)
 - [实测结果](#实测结果)
+- [与六家主流架构的对照](#与六家主流架构的对照)
+- [线性架构的 CPU 推理 Runtime](#线性架构的-cpu-推理-runtime)
 - [仓库结构](#仓库结构)
 - [原创性说明](#原创性说明)
 - [风险与局限](#风险与局限)
@@ -81,9 +154,10 @@ python experiments/collect_results.py --out docs/_tables.md
 ```
 
 手写 AVX2 内核需 C 编译器（w64devkit / GCC）：
+将 `SUNNY_W64` 指向 w64devkit 根目录，或把 `gcc` 加入 PATH。
 
 ```bash
-export SUNNY_W64=F:/devtools/w64devkit
+export SUNNY_W64=<w64devkit 解压目录>
 python -X utf8 experiments/_kernel_bench.py        # 算子级加速比
 python -X utf8 experiments/_core_e2e.py 256 6 8    # 融合内核训练步 A/B
 ```
@@ -157,6 +231,7 @@ Xavier / Glorot / He / MSRA 初始化、LSTM / GRU 门控公式、SSM / HiPPO �
   差距随 T 继续拉大。不需内核即可获得。
 - 短上下文（T<512）解码不是优势场景，内核融合在此也无收益。
 - 边界：单条序列、B=1、随机初始化模型、2 轮中位，未测批处理解码，不含 KV cache 量化/分页。
+- 与 O(N) 同行同场对照见下节：SunnyNet 解码**不是最快**，rwkv 全程第 1、快 1.9–2.6×。
 
 ### 质量
 
@@ -193,6 +268,159 @@ smalln80）——窄残差流是已验证的缓解手段。
 （未做 CUDA 侧优化，是下界）。本机 GPU（GTX 1060 6GB）仅用于正确性验证与加速比测量，
 无同行 GPU 对照。
 
+### 0.5B 在 6GB 卡上的实测边界
+
+| 档位 | 峰值显存 | 结果 |
+|---|---|---|
+| 构建（498M 参数，fp32） | 1902 MB | 通过 |
+| 前向 T=512 | 2010 MB | 通过 |
+| 前向 T=1024 | 2060 MB | 通过 |
+| **SGD 单步**（T=512） | **5004 MB** | **通过**，但只剩 563 MB（9% 余量） |
+| AdamW 单步 | >6144 MB | **OOM** |
+
+约束来自优化器状态的算术：fp32 参数 1.9GB + 梯度 1.9GB + AdamW 一阶/二阶矩 3.8GB
+= 7.6GB > 6GB，SGD 只有梯度一项所以勉强塞得下。
+优化器状态 CPU offload 在本机失败——主机物理内存只剩 4.5GB，装不下 offload 的
+3.7GB 优化器态，触发页文件压力并拖垮 CUDA 上下文。
+⇒ **0.5B 在这台机器上可跑单步 SGD，但无多步收敛与质量数据。**
+
+测量注意：同一进程内先跑 T=512/T=1024 前向再跑训练步，会因显存碎片使训练步 OOM
+（实测剩余 1.9GB 仍分配不出 16MB）；**每档必须独立子进程**，否则得到错误的"不可行"结论。
+
+---
+
+## 与六家主流架构的对照
+
+对照对象：`h3`、`rwkv`、`mamba`、`hyena`、`linear_attn`、`transformer`。
+所有数字来自本机实测、逐格独立子进程。完整数据见 [docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md) 第 23 节。
+
+### 记分卡
+
+| 维度 | SunnyNet 位置 | 最优者 | 差距 |
+|---|---|---|---|
+| 质量 ppl（1.4M / 600 步） | 第 2（57.83） | h3 53.93 | 落后 7.2% |
+| 质量 ppl（20M / 200 步） | **第 1**（77.90） | sunnynet | — |
+| 质量 ppl（100M / 100 步） | 第 2（109.47） | rwkv 105.66 | 落后 3.6% |
+| 训练速度（L=4 等栈参数） | 与 rwkv 统计持平 | rwkv（名义） | 配对检验不显著 |
+| 训练速度（L=6 层数对齐） | **落后** | rwkv | 慢 30–40% |
+| 训练态内存（T=1024） | 第 2 低 | rwkv 1611MB | 高 12%，比 TF 低 43% |
+| 前向 ms/token（batch=1） | 第 6 → 第 3（随 T） | hyena | 全程未登顶 |
+| **解码 ms/step（B=1）** | 第 5 → 第 2 | **rwkv** | 慢 1.9–2.6× |
+| 长距离检索（代码域） | 与 TF 持平 | 并列 | — |
+| 长距离检索（自然语言） | 接近 0 | — | 无优势 |
+| 跨分布泛化 | 中文新域第 1 / 英文第 2 | sunnynet | — |
+
+### 解码态七架构对照
+
+口径：每个 (架构, T) 独立子进程；先逐 token 走满 T 步建立真实解码状态（不计时），
+再测该长度下单步解码 ms；1 线程；2 轮取中位。
+
+ms/step（越低越好）：
+
+| 架构 | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
+|---|---|---|---|---|---|
+| `rwkv` | **1.768** | **1.574** | **1.598** | **2.113** | **1.564** |
+| `h3` | 2.517 | 2.524 | 2.487 | 2.969 | 3.227 |
+| `transformer` | 2.550 | 2.667 | 3.426 | 5.049 | 6.219 |
+| `mamba` | 2.686 | 2.742 | 2.573 | 2.773 | 3.205 |
+| **`sunnynet`** | **3.279** | **4.067** | **3.086** | **3.331** | **2.854** |
+| `hyena` | 3.346 | 3.583 | 3.662 | 5.101 | 4.530 |
+| `linear_attn` | 4.061 | 3.452 | 4.599 | 3.676 | 3.624 |
+
+读数：
+
+- Transformer 的 O(t) 被复现（2.550 → 6.219 ms），T=4096 时 SunnyNet 快 2.18×。
+- SunnyNet 单步成本大致平坦，排名随 T 改善（5→7→4→4→2），但**从未追上 rwkv**。
+- **解码态最优是 rwkv**（1.57–2.11 ms），单步只有一条 `p*s + k*v` 逐元素链；
+  SunnyNet 单步含竞争门控（3 次 sigmoid）、门控概率、扫描、反馈支路，算子数是它的数倍。
+- 五个 O(N) 同行此前都无单步解码接口，本仓库为其实现 `init_state`/`step`，
+  与整段前向数值一致性 maxdiff ≤ 4e-05。
+
+### 差距的共同根因
+
+落后的维度（解码速度、前向速度、L=6 训练速度、100M 质量、自然语言长距离检索）
+收敛到同一个根因：**逐元素算子数量**。证据：训练步 4524 次 aten 调用；
+减层加宽（等栈参数）训练快 12–17% 且 ppl −10.9%；层数对齐到 L=6 后同预算窄配置反慢 30–40%；
+解码态 rwkv 靠单条逐元素链取胜。⇒ 有效方向只有减算子数，不是加宽、调 batch 或换矩阵库。
+
+---
+
+## 线性架构的 CPU 推理 Runtime
+
+`sunnynet/runtime/` 是独立于 PyTorch 的 C 推理内核（AVX2/FMA + OpenMP），只依赖 ctypes
+与 C 编译器。它实现通用一阶递推
+
+```
+s_t = a_t * s_{t-1} + b_t              (FMA)
+s_t = a_t * s_{t-1} + (1 - a_t) * u_t  (门控)
+```
+
+RWKV 的 wkv、Mamba/S6 与 H3 的对角 SSM、S4、线性注意力的 KV 累加、SunnyNet 的滚动状态，
+全部归约为这两种形式之一。
+
+### 跨架构映射（`experiments/_unified_ir_map.py`）
+
+各架构递推映射到内核参数，与自身 PyTorch 递推逐元素比对，B=2/T=128/N=128/fp32：
+
+| 架构递推形式 | 映射 | max\|diff\| |
+|---|---|---|
+| RWKV-4 wkv | `a=p`, `b=k*v` | 9.5e-07 |
+| Mamba / S6 SSM | `a=decay`, `u=bu` | 2.4e-07 |
+| H3 对角 SSM | `a=decay`, `u=v` | 1.2e-07 |
+| 线性注意力累积 KV | `a=1`, `b=k v^T` | 0.0 |
+| SunnyNet 滚动状态 | `a=p`, `u=u` | 1.9e-06 |
+| S4 对角 SSM | `a=A_bar`, `b=B_bar x` | 7.2e-07 |
+
+Hyena 是长卷积（FIR）递推，不属一阶状态递推，需独立卷积后端。
+
+### 速度（`experiments/_runtime_bench.py`）
+
+每格独立子进程、单线程、B=1、10 次中位。基线是 torch 向量化分块扫描
+（`ops.gated_scan`，cumsum 闭式解），不是 Python 循环。
+
+| T | N | 模式 | 向量化 ms | 内核 ms | 倍数 |
+|---|---|---|---|---|---|
+| 256 | 128 | FMA | 0.391 | 0.043 | 9.08× |
+| 1024 | 128 | FMA | 1.256 | 0.132 | 9.54× |
+| 4096 | 128 | GATED | 8.500 | 0.806 | 10.55× |
+| 4096 | 640 | FMA | 26.944 | 7.574 | 3.56× |
+
+中位 **9.90×**，范围 3.56–19.29×。N=640 时降到 3.6–4.0×（单线程内存带宽限制）。
+与内核的三分支最大数值差 7.63e-06。
+
+### 状态量化（`experiments/_state_quant.py`）
+
+凸组合状态幅度由构造有界。T=2048、真实 ckpt 第 0 层状态：
+
+| 模式 | \|s\| 漂移 (末/1/8 处) | 固定标度相对误差 | 溢出通道比 |
+|---|---|---|---|
+| 有界递推 | 1.06× | 4.0e-02 | 0.78% |
+| 无界累加 | 7.94× | 5.0e-01 | 5.47% |
+
+固定标度下的相对误差相差 12.5×。
+边界：只测第 0 层、单 ckpt（1.4M）、单条随机序列，不做端到端 ppl 对照。
+
+### 命令行
+
+```bash
+python -m sunnynet.cli --ckpt experiments/ckpts_ood/sunnynet.pt \
+    --prompt "子曰：" --max-new 80 --stats
+```
+
+### 路线
+
+现有资产：原创架构、AVX2 融合内核（训练步 1.10–1.17×）、通用递推 C Runtime
+（对向量化基线中位 9.9×）、跨架构映射验证。
+
+近期补齐：Runtime 侧的自回归解码循环（`state` 封装）、权重格式转换（从 ckpt 导出
+纯 C 可读布局）、INT8 权重对称量化。
+
+中期：把内核从 SunnyNet 定制扩展为任意 `s_t = a_t*s_{t-1} + b_t` 的通用单步/批量扫描；
+补 AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务。
+
+不做的：复刻 llama.cpp 的通用张量算子层（GGML 为 Transformer 设计，逐算子调度）；
+打平 Transformers / vLLM（分别为模型仓库与 GPU 服务赛道）。
+
 ---
 
 ## 仓库结构
@@ -206,6 +434,8 @@ sunnynet/
   linear_baselines.py  O(N) 同复杂度对照: 线性注意力 / RWKV / Mamba / Hyena / H3
   model.py        SunnyNet 主体 (状态 (B,L,D), 逐层接力)
   init.py         谱锚定初始化
+  cli.py          命令行推理 (加载 ckpt -> 分词器 -> 自回归解码)
+  runtime/        独立 C 推理 Runtime (通用递推内核 + INT8 量化, 不依赖 torch)
   baseline.py     同参数量 Transformer 对照 (仅用于对照, 非架构本体)
   tokenizer.py    从零实现的 BPE 分词器
   profiling.py    真实性能探针 (峰值内存 / 访存 / 吞吐)

@@ -85,6 +85,19 @@ class _LMBase(nn.Module):
             return logits, None
         return logits
 
+    def init_state(self, batch: int, device=None, dtype=torch.float32):
+        return [blk.init_state(batch, device, dtype) for blk in self.blocks]
+
+    @torch.no_grad()
+    def forward_step(self, idx_t, state):
+        """单步自回归 (每块各持状态): idx_t (B,) -> (logits (B,V), state)."""
+        x = self.embed(idx_t)
+        new = []
+        for blk, st in zip(self.blocks, state):
+            x, stn = blk.step(x, st)
+            new.append(stn)
+        return self.head(self.ln_f(x)), new
+
 
 class _FFN(nn.Module):
     def __init__(self, d_model: int, d_ff: int):
@@ -157,6 +170,28 @@ class LinearAttentionBlock(nn.Module):
         x = x + self.proj(y)
         return x + self.ff(self.ln2(x))
 
+    def init_state(self, B, device=None, dtype=torch.float32):
+        return {"kv": torch.zeros(B, self.n_heads, self.d_head, self.d_head,
+                                  device=device, dtype=dtype),
+                "k": torch.zeros(B, self.n_heads, self.d_head, device=device, dtype=dtype)}
+
+    def step(self, x_t, st):
+        B, C = x_t.shape
+        h = self.ln1(x_t).unsqueeze(1)                       # (B,1,C)
+        q, k, v = self.qkv(h).split(C, dim=-1)
+        q = (F.elu(q) + 1.0).view(B, self.n_heads, 1, self.d_head)
+        k = (F.elu(k) + 1.0).view(B, self.n_heads, 1, self.d_head)
+        v = v.view(B, self.n_heads, 1, self.d_head)
+        kv, kst = st["kv"], st["k"]
+        self_term = (q * k).sum(-1)                          # (B,H,1) 当前 token 自项
+        num = torch.einsum("bhcd,bhde->bhce", q, kv) + self_term.unsqueeze(-1) * v
+        den = torch.einsum("bhcd,bhd->bhc", q, kst).unsqueeze(-1) + self_term.unsqueeze(-1) + 1e-6
+        y = (num / den).squeeze(2).reshape(B, C)
+        x_t = x_t + self.proj(y)
+        stn = {"kv": kv + torch.einsum("bhcd,bhce->bhde", k, v),
+               "k": kst + k.sum(dim=2)}
+        return x_t + self.ff(self.ln2(x_t)), stn
+
 
 class RWKVBlock(nn.Module):
     """RWKV-4 风格: wkv 用闭式扫描实现, 通道混合用 relu^2."""
@@ -189,6 +224,21 @@ class RWKVBlock(nn.Module):
         x = x + y
         h2 = self.ln2(x)
         return x + self.value(F.relu(self.key(h2)) ** 2)
+
+    def init_state(self, B, device=None, dtype=torch.float32):
+        d = self.ln1.weight.shape[0]
+        return {"wkv": torch.zeros(B, d, device=device, dtype=dtype)}
+
+    def step(self, x_t, st):
+        h = self.ln1(x_t)
+        p = torch.sigmoid(self.decay(h)).clamp(1e-4, 1.0 - 1e-6)
+        k = self.k_proj(h)
+        v = self.v_proj(h)
+        wkv = p * st["wkv"] + k * v
+        r = torch.sigmoid(self.r_proj(h))
+        x_t = x_t + self.out(r * wkv)
+        h2 = self.ln2(x_t)
+        return x_t + self.value(F.relu(self.key(h2)) ** 2), {"wkv": wkv}
 
 
 class MambaBlock(nn.Module):
@@ -228,6 +278,31 @@ class MambaBlock(nn.Module):
         y = states * F.silu(z) + self.D.view(1, 1, -1) * xs
         x = x + self.out_proj(y)
         return x + self.ff(self.ln2(x))
+
+    def init_state(self, B, device=None, dtype=torch.float32):
+        d = self.in_proj.out_features // 2
+        k = self.conv.kernel_size[0] - 1
+        return {"ssm": torch.zeros(B, d, device=device, dtype=dtype),
+                "hist": torch.zeros(B, k, 2 * d, device=device, dtype=dtype)}
+
+    def step(self, x_t, st):
+        d = self.in_proj.out_features // 2
+        h = self.ln1(x_t)
+        xz = self.in_proj(h)                                   # (B,2d)
+        seq = torch.cat([st["hist"], xz.unsqueeze(1)], dim=1)   # (B,k+1,2d)
+        w = self.conv.weight[:, 0, :].transpose(0, 1)          # (k+1,2d)
+        b = self.conv.bias
+        conv = (seq * w.unsqueeze(0)).sum(1) + b               # (B,2d)
+        xs, z = conv.split(d, dim=-1)
+        xs = F.silu(xs)
+        dbc = self.x_proj(xs)
+        dt_r, b_, c_ = dbc.split([self.dt_proj.in_features, d, d], dim=-1)
+        dt = F.softplus(self.dt_proj(dt_r))
+        decay = torch.exp(dt * (-torch.exp(self.A_log)).view(1, -1))
+        ssm = decay * st["ssm"] + (1.0 - decay) * (b_ * xs)
+        y = ssm * F.silu(z) + self.D.view(1, -1) * xs
+        x_t = x_t + self.out_proj(y)
+        return x_t + self.ff(self.ln2(x_t)), {"ssm": ssm, "hist": seq[:, 1:]}
 
 
 class HyenaBlock(nn.Module):
@@ -270,6 +345,36 @@ class HyenaBlock(nn.Module):
         x = x + self.out_proj(y)
         return x + self.ff(self.ln2(x))
 
+    def init_state(self, B, device=None, dtype=torch.float32):
+        C = self.out_proj.in_features
+        L = self.filters.shape[-1]
+        k = self.short.kernel_size[0] - 1
+        return {"hist": torch.zeros(3, B, L - 1, C, device=device, dtype=dtype),
+                "shist": torch.zeros(B, k, C, device=device, dtype=dtype)}
+
+    def _conv_step(self, i, inp, hist):
+        L = self.filters.shape[-1]
+        seq = torch.cat([hist[i], inp.unsqueeze(1)], dim=1)      # (B,L,C)
+        f = self.filters[i].transpose(0, 1)                      # (L,C)
+        return (seq * f.unsqueeze(0)).sum(1), seq[:, 1:]
+
+    def step(self, x_t, st):
+        C = self.out_proj.in_features
+        h = self.ln1(x_t)
+        u, g1, g2 = self.in_proj(h).split(C, dim=-1)
+        hist, shist = st["hist"], st["shist"]
+        y, h0 = self._conv_step(0, u, hist)
+        y = y * g1
+        y, h1 = self._conv_step(1, y, hist)
+        y = y * g2
+        y, h2 = self._conv_step(2, y, hist)
+        sseq = torch.cat([shist, y.unsqueeze(1)], dim=1)         # (B,k+1,C)
+        w = self.short.weight[:, 0, :].transpose(0, 1)           # (k+1,C)
+        y = (sseq * w.unsqueeze(0)).sum(1) + self.short.bias
+        x_t = x_t + self.out_proj(y)
+        stn = {"hist": torch.stack([h0, h1, h2]), "shist": sseq[:, 1:]}
+        return x_t + self.ff(self.ln2(x_t)), stn
+
 
 class H3Block(nn.Module):
     """H3-2 风格: 对角 SSM (闭式扫描) + 短卷积 + 乘性门控."""
@@ -298,6 +403,26 @@ class H3Block(nn.Module):
         y = u * states * torch.sigmoid(g)
         x = x + self.out_proj(y)
         return x + self.ff(self.ln2(x))
+
+    def init_state(self, B, device=None, dtype=torch.float32):
+        d = self.out_proj.in_features
+        k = self.short_conv.kernel_size[0] - 1
+        return {"ssm": torch.zeros(B, d, device=device, dtype=dtype),
+                "hist": torch.zeros(B, k, 3 * d, device=device, dtype=dtype)}
+
+    def step(self, x_t, st):
+        d = self.out_proj.in_features
+        h = self.ln1(x_t)
+        u, v, g = self.in_proj(h).split(d, dim=-1)
+        seq = torch.cat([st["hist"], torch.cat([u, v, g], -1).unsqueeze(1)], dim=1)
+        w = self.short_conv.weight[:, 0, :].transpose(0, 1)    # (k+1,3d)
+        conv = (seq * w.unsqueeze(0)).sum(1) + self.short_conv.bias
+        u, v, g = conv.split(d, dim=-1)
+        decay = torch.sigmoid(-self.a_log).view(1, -1)
+        ssm = decay * st["ssm"] + (1.0 - decay) * v
+        y = u * ssm * torch.sigmoid(g)
+        x_t = x_t + self.out_proj(y)
+        return x_t + self.ff(self.ln2(x_t)), {"ssm": ssm, "hist": seq[:, 1:]}
 
 
 BLOCKS = {
