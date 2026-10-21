@@ -57,18 +57,25 @@ def _sample(last: torch.Tensor, temperature: float, top_k: int, top_p: float):
 @torch.no_grad()
 def decode_stream(model, tk, prompt: str, max_new: int = 80,
                   temperature: float = 0.8, top_k: int = 40, top_p: float = 0.95,
-                  seed: int | None = None, verbose: bool = False):
-    """逐 token 生成, yield 新 token 的文本片段; 返回 (全文, 统计)."""
+                  seed: int | None = None, verbose: bool = False,
+                  runtime=None):
+    """逐 token 生成, yield 新 token 的文本片段; 返回 (全文, 统计).
+
+    runtime 给定时, 解码走独立 C 内核 (整模型单步), 采样与分词仍在 torch。
+    """
     if seed is not None:
         torch.manual_seed(seed)
     ids = tk.encode(prompt) or [tk.bos_id]
-    s = model.init_state(1)
     t0 = time.perf_counter()
-    logits, s = model(torch.tensor([ids], dtype=torch.long), return_state=True)
+    if runtime is not None:
+        logits = torch.tensor(runtime.prefill(ids))
+    else:
+        s = model.init_state(1)
+        logits, s = model(torch.tensor([ids], dtype=torch.long), return_state=True)
+        logits = logits[0, -1]
     prefill_s = time.perf_counter() - t0
     out = list(ids)
-    last = logits[0, -1]
-    s0 = s
+    last = logits
     step_times = []
     for _ in range(max_new):
         nxt = _sample(last, temperature, top_k, top_p)
@@ -78,12 +85,16 @@ def decode_stream(model, tk, prompt: str, max_new: int = 80,
         if nxt == tk.eos_id:
             break
         t0 = time.perf_counter()
-        last, s = model.forward_step(torch.tensor([nxt]), s)
+        if runtime is not None:
+            last = torch.tensor(runtime.step(nxt))
+        else:
+            last, s = model.forward_step(torch.tensor([nxt]), s)
+            last = last[0]
         step_times.append(time.perf_counter() - t0)
-        last = last[0]
     stats = {
         "prefill_tokens": len(ids),
         "prefill_ms": prefill_s * 1e3,
+        "backend": "c" if runtime is not None else "torch",
         "gen_tokens": len(step_times),
         "decode_ms_median": (sorted(step_times)[len(step_times) // 2] * 1e3
                              if step_times else 0.0),
@@ -92,7 +103,7 @@ def decode_stream(model, tk, prompt: str, max_new: int = 80,
     }
     decode_stream.stats = stats
     decode_stream.text = tk.decode(out)
-    decode_stream.state = s0
+    decode_stream.state = None
 
 
 def main(argv=None):
@@ -107,6 +118,9 @@ def main(argv=None):
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--tokenizer", default=str(TOKENIZER))
     ap.add_argument("--threads", type=int, default=0, help="0 = 不限制")
+    ap.add_argument("--backend", choices=["torch", "c"], default="torch",
+                    help="c = 纯 C 整模型单步 (需先导出 .runtime.bin)")
+    ap.add_argument("--blob", default=None, help="--backend c 的权重 blob 路径")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     args = ap.parse_args(argv)
@@ -121,10 +135,21 @@ def main(argv=None):
     model, cfg, summary = load_model(args.ckpt)
     n = model.num_params()
 
+    runtime = None
+    if args.backend == "c":
+        from .runtime.model import SnModel
+        blob = Path(args.blob) if args.blob else Path(args.ckpt).with_suffix(".runtime.bin")
+        if not blob.exists():
+            raise SystemExit(f"缺少权重 blob: {blob}\n"
+                             f"先运行: python -X utf8 experiments/_export_runtime.py "
+                             f"{args.ckpt} {blob}")
+        runtime = SnModel(blob, cfg.vocab_size, cfg.dim, cfg.inner, cfg.rank,
+                          cfg.taps, cfg.layers, 8, int(cfg.tie_embeddings))
+
     pieces = []
     for p in decode_stream(model, tk, args.prompt, args.max_new,
                            args.temperature, args.top_k, args.top_p,
-                           args.seed, verbose=True):
+                           args.seed, verbose=True, runtime=runtime):
         pieces.append(p)
         sys.stdout.write(p)
         sys.stdout.flush()
@@ -137,7 +162,8 @@ def main(argv=None):
                           "stats": st}, ensure_ascii=False, indent=2))
     elif args.stats:
         print()
-        print(f"[params {n/1e6:.2f}M dim {cfg.dim} layers {cfg.layers}]")
+        print(f"[params {n/1e6:.2f}M dim {cfg.dim} layers {cfg.layers} "
+              f"backend {st.get('backend', 'torch')}]")
         print(f"[prefill {st['prefill_tokens']} tok {st['prefill_ms']:.1f} ms; "
               f"decode {st['gen_tokens']} tok "
               f"{st['decode_ms_per_token']:.2f} ms/tok]")

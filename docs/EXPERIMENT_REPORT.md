@@ -2274,10 +2274,47 @@ N=640 时降到 3.6–4.0×（单线程下内存带宽成为限制）。
 
 B=1 单序列也不是 Runtime 的目标场景（§23.3：解码态最优是 rwkv）。
 
-### 24.7 命令行推理
+### 24.7 整模型 C 解码：把整个前向搬进 C
+
+§24.6 的负面结果定位在"跨语言调用 + 状态搬运"，那么出路是让每步只跨一次语言边界：
+把嵌入查表、逐层 norm / 深度卷积历史 / 门控竞争 / 状态递推 / 读出、终态归一、LM head
+全部放进 C，一步一次 `sn_step` 调用。权重由 `experiments/_export_runtime.py` 导出为打包
+fp32 blob：矩阵乘权重预转置 `(in, out)` 配合 GEMV（一次 AVX2 load 覆盖 8 个输出行），
+`circ ∘ W_s` 折成单矩阵，`p` 的 clamp 在构造期判掉（与 §16 一致）。
+
+数值一致性 `experiments/_runtime_model_equiv.py`（1.4M ckpt，48 token 逐步）：
+
+| 口径 | 结果 |
+|---|---|
+| 单步 logits max\|diff\| | 1.24e-05 |
+| argmax 一致 | 48 / 48 |
+| prefill 末 token vs torch 整段前向 | 3.81e-06 |
+
+端到端延迟 `experiments/_runtime_decode.py`（B=1 单序列、单线程、每格独立子进程、
+先走满 prefill 再测单步、3 轮交错）：
+
+| prefill T | torch ms/step | C ms/step | 比值 | 逐轮占优 |
+|---|---|---|---|---|
+| 256 | 3.796 | 2.487 | 1.53× | 3/3 |
+| 1024 | 3.802 | 1.851 | 2.05× | 3/3 |
+| 2048 | 4.309 | 2.189 | 1.97× | 3/3 |
+
+中位比值与逐轮符号检验一致（三格全 3/3），可判定真实提升。提速来源是消灭每步约
+1100 次 aten 调用（剖析：`aten::mm` 16.4% / `aten::mul` 10.2% / `aten::select` 8.5% /
+`aten::cat` 8.0%），不是算子融合本身。
+
+**边界**：单线程 B=1 口径。CLI 默认 8 线程时 C 4.40 vs torch 4.56 ms/tok（24 token
+单次读数，未多轮），差距被调度摊平——B=1 小张量并行是负收益（§20.2）。C 后端的优势在
+单线程与更大批量，多线程 B=1 不得按上表线性外推。
+
+**开发中定位到的一个真实 bug（已修）**：mingw 的 `fopen` 走 ANSI 代码页，含中文的
+Windows 路径打不开权重文件；C 侧改用 `_wfopen` + `MultiByteToWideChar(CP_UTF8)`。
+
+### 24.8 命令行推理
 
 `sunnynet/cli.py`，`python -m sunnynet.cli --ckpt <path> --prompt "..."`。
 加载 ckpt → 分词器 → 自回归解码，`--stats` 输出 prefill/decode 耗时。
+`--backend c` 走整模型 C 解码（需先用 `experiments/_export_runtime.py` 导出 blob）。
 
 ---
 

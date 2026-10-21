@@ -65,7 +65,9 @@ RWKV's wkv, Mamba/S6 and H3 diagonal SSM, S4, linear-attention KV accumulation, 
 
 The convex-combination state has a bounded magnitude by construction. Over T=2048 the state magnitude drifts 1.06× versus 7.94× for unbounded accumulation, and under a fixed INT8 scale the relative error is 4.0e-02 versus 5.0e-01.
 
-CLI: `python -m sunnynet.cli --ckpt runs/small.pt --prompt "..."`.
+The whole decode step — embedding lookup, per-layer norm, depthwise conv history, gated competition, state recurrence, readout, final norm, LM head — also runs in C with no intermediate tensors. Weights are exported from a checkpoint into a packed fp32 blob (matmul weights pre-transposed for GEMV, `circ ∘ W_s` folded into one matrix). Against `SunnyNet.forward_step`, per-token logits agree to 1.24e-05 and argmax matches 48/48. Whole-model decode is 1.53× / 2.05× / 1.97× faster than torch at prefill T=256/1024/2048 (B=1, single thread, 3 rounds, C wins 3/3 every cell).
+
+CLI: `python -m sunnynet.cli --ckpt runs/small.pt --prompt "..."` (`--backend c` for the pure-C decode path).
 
 ---
 
@@ -393,6 +395,39 @@ Hyena 是长卷积（FIR）递推，不属一阶状态递推，需独立卷积�
 ⇒ 不得声称端到端解码加速。原因：模型侧 T=1、B=1，跨语言调用与状态搬运成本
 与单算子同量级。B=1 单序列也不是本 Runtime 的目标场景（解码态最优是 rwkv）。
 
+### 整模型 C 解码（`sunnynet/runtime/sunnynet.c`）
+
+单步算子内核之上，整个前向也搬进了 C：嵌入查表、逐层 norm / 深度卷积历史 / 门控竞争 /
+状态递推 / 读出、终态归一、LM head，全在一条无中间张量的路径上完成。权重由
+`experiments/_export_runtime.py` 从 ckpt 导出为打包 fp32 blob（矩阵乘权重预转置为
+`(in, out)` 以配合 GEMV，`circ ∘ W_s` 折成单矩阵）。
+
+数值一致性（`experiments/_runtime_model_equiv.py`，1.4M ckpt，48 token 逐步）：
+
+| 口径 | 结果 |
+|---|---|
+| 单步 logits max\|diff\| | 1.24e-05 |
+| argmax 一致 | 48 / 48 |
+| prefill 末 token 与 torch 整段前向 | 3.81e-06 |
+
+端到端解码延迟（`experiments/_runtime_decode.py`，B=1 单序列、单线程、每格独立子进程、
+先走满 prefill 再测单步、3 轮交错）：
+
+| prefill T | torch ms/step | C ms/step | 比值 | 逐轮占优 |
+|---|---|---|---|---|
+| 256 | 3.796 | 2.487 | 1.53× | 3/3 |
+| 1024 | 3.802 | 1.851 | 2.05× | 3/3 |
+| 2048 | 4.309 | 2.189 | 1.97× | 3/3 |
+
+中位比值与逐轮符号检验一致（四格全 3/3），可判定为真实提升，非轮间噪声。
+提速来源不是算子融合，而是消灭每步约 1100 次 aten 调用 / 21 次 GEMV / 20 次 cat
+（torch 单步剖析：`aten::mm` 16.4%、`aten::mul` 10.2%、`aten::select` 8.5%、`aten::cat` 8.0%）。
+
+**口径边界**：上表是**单线程 B=1**。CLI 默认 8 线程时 C 后端 4.40 ms/tok vs
+torch 4.56 ms/tok（24 token 单次读数，未做多轮），差距被线程调度摊平——B=1 小张量
+并行是负收益（§20.2 已记录 1 线程比 8 线程快 1.42×）。C 后端的优势在单线程与更大批量，
+多线程 B=1 下不要按上表线性外推。
+
 ### 状态量化（`experiments/_state_quant.py`）
 
 凸组合状态幅度由构造有界。T=2048、真实 ckpt 第 0 层状态：
@@ -408,17 +443,25 @@ Hyena 是长卷积（FIR）递推，不属一阶状态递推，需独立卷积�
 ### 命令行
 
 ```bash
+# torch 后端
 python -m sunnynet.cli --ckpt experiments/ckpts_ood/sunnynet.pt \
     --prompt "子曰：" --max-new 80 --stats
+
+# 纯 C 后端 (先导出权重 blob, 再解码)
+python -X utf8 experiments/_export_runtime.py \
+    experiments/ckpts_ood/sunnynet.pt experiments/ckpts_ood/sunnynet.runtime.bin
+python -m sunnynet.cli --ckpt experiments/ckpts_ood/sunnynet.pt \
+    --backend c --prompt "子曰：" --max-new 80 --stats
 ```
 
 ### 路线
 
 现有资产：原创架构、AVX2 融合内核（训练步 1.10–1.17×）、通用递推 C Runtime
-（对向量化基线中位 9.9×）、跨架构映射验证。
+（对向量化基线中位 9.9×）、**C 整模型单步解码（B=1 单线程 1.53–2.05×）**、
+跨架构映射验证。
 
-近期补齐：Runtime 侧的自回归解码循环（`state` 封装）、权重格式转换（从 ckpt 导出
-纯 C 可读布局）、INT8 权重对称量化。
+近期补齐：权重格式转换（GGUF 只读，先读 RWKV-7）、INT8 权重量化、
+更大批量的 C 解码（多序列共享权重读取）。
 
 中期：把内核从 SunnyNet 定制扩展为任意 `s_t = a_t*s_{t-1} + b_t` 的通用单步/批量扫描；
 补 AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务。
@@ -439,8 +482,11 @@ sunnynet/
   linear_baselines.py  O(N) 同复杂度对照: 线性注意力 / RWKV / Mamba / Hyena / H3
   model.py        SunnyNet 主体 (状态 (B,L,D), 逐层接力)
   init.py         谱锚定初始化
-  cli.py          命令行推理 (加载 ckpt -> 分词器 -> 自回归解码)
-  runtime/        独立 C 推理 Runtime (通用递推内核 + INT8 量化, 不依赖 torch)
+  cli.py          命令行推理 (加载 ckpt -> 分词器 -> 自回归解码, --backend torch/c)
+  runtime/        独立 C 推理 Runtime
+    recur.c         通用一阶递推内核 (扫描 / 反向 / 单步 / INT8 量化)
+    sunnynet.c      整模型单步解码 (B=1, 无中间张量)
+    model.py        ctypes 绑定
   baseline.py     同参数量 Transformer 对照 (仅用于对照, 非架构本体)
   tokenizer.py    从零实现的 BPE 分词器
   profiling.py    真实性能探针 (峰值内存 / 访存 / 吞吐)
@@ -455,7 +501,8 @@ experiments/
   make_figures.py      生成全部图表 -> docs/figures/
   collect_results.py   汇总所有结果为 Markdown 表
 tests/
-  test_architecture.py  架构自检 (分块一致性 / 因果性 / 梯度界 / 深度稳定, 59 项)
+  test_architecture.py  架构自检 (分块一致性 / 因果性 / 梯度界 / 深度稳定, 63 项)
+  test_runtime_model.py C 整模型解码一致性
   test_smoke_pipeline.py 端到端冒烟 (合成语料 -> 训练 -> 评估)
 prepare_data.py   真实语料采集
 build_corpus.py   分词器训练 + token 流构建
