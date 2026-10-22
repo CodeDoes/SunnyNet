@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.0
 
 ### 外部权重
 - GLA 接入（`sunnynet/runtime/gla.py`）：门控只在 key 维，衰减可分解为按行缩放
@@ -30,6 +30,13 @@
 - `sunnynet-release`（`sunnynet/release.py`）：导出 safetensors（config 与训练摘要
   写入 metadata）、runtime blob、模型卡与 sha256 清单。
 - 训练器支持 `--device cuda`，checkpoint 统一以 CPU tensor 落盘。
+- `p100mw` 在 GTX 1060 6GB 上训练 2000 步（1.024M token），val ppl 9983 → 120.09，
+  0.503 ms/token。发布资产 `.pt` 467.7 MB / `.safetensors` 421.5 MB /
+  `.runtime.bin` 467.6 MB，torch、C Runtime、OpenAI 服务三条路径加载生成均通过。
+
+### 测试
+- 121 passed / 10 skipped（新增 `test_abi.py`、`test_simd.py`、`test_integrate.py`、
+  `test_release.py`）。
 
 ## v0.1.0
 

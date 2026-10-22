@@ -28,7 +28,7 @@ The design targets the real CPU bottleneck — memory bandwidth and cache behavi
 
 ### Measured results
 
-All numbers are measured on one machine (i7-8750H, AVX2, PyTorch 2.14.1 CPU) with per-cell process isolation. Full data, including negative results, is in [docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md).
+All numbers are measured on one machine (i7-8750H, AVX2, PyTorch 2.14.1 CPU) with per-cell process isolation. Full data, including negative results, is in [docs/EXPERIMENT_REPORT.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/EXPERIMENT_REPORT.md).
 
 | Metric | SunnyNet | Best peer | Setting |
 |---|---|---|---|
@@ -193,7 +193,7 @@ s_t = p_t ⊙ s_{t-1} + (1 - p_t) ⊙ u_t ,     p_t ∈ [1-δ_i, 1]
 同一层内同时存在从"只记 2 个 token"到"记忆 8192 个 token"的全时间尺度，
 兼顾局部语法与跨段落、跨代码块的长距离依赖。
 
-完整数学推导见 **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)**。
+完整数学推导见 **[docs/ARCHITECTURE.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ARCHITECTURE.md)**。
 
 ---
 
@@ -217,7 +217,7 @@ Xavier / Glorot / He / MSRA 初始化、LSTM / GRU 门控公式、SSM / HiPPO �
 ## 实测结果
 
 全部实验共用同一 token 流、同一配置、同一 token 预算与线程数。参数量用 meta device
-实例化对齐，层数偏离基准不超过 ±1。完整数据见 [docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md)。
+实例化对齐，层数偏离基准不超过 ±1。完整数据见 [docs/EXPERIMENT_REPORT.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/EXPERIMENT_REPORT.md)。
 
 ### 训练速度
 
@@ -341,7 +341,7 @@ OpenAI 服务经官方 SDK 四种调用方式全通过。**1520 步上限、单�
 ## 与六家主流架构的对照
 
 对照对象：`h3`、`rwkv`、`mamba`、`hyena`、`linear_attn`、`transformer`。
-所有数字来自本机实测、逐格独立子进程。完整数据见 [docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md) 第 23 节。
+所有数字来自本机实测、逐格独立子进程。完整数据见 [docs/EXPERIMENT_REPORT.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/EXPERIMENT_REPORT.md) 第 23 节。
 
 ### 记分卡
 
@@ -760,7 +760,7 @@ python -c "from sunnynet.kernels.simd import cross_compile_neon; cross_compile_n
 
 ctypes 绑定在 `sunnynet/runtime/abi.py`，与内部句柄路径**逐位一致**
 （`max|diff| = 0.0`）。契约测试 9 项全绿（版本协商、能力位、错误码、
-`check(1)=OK` / `check(9)=E_UNSUPPORTED`、RWKV-7 步进等价）。详见 `docs/ABI.md`。
+`check(1)=OK` / `check(9)=E_UNSUPPORTED`、RWKV-7 步进等价）。详见 [docs/ABI.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ABI.md)。
 
 ### 命令行
 
@@ -932,7 +932,7 @@ docs/ARCHITECTURE.md 第 3/4/5 节。保留这些记录是为了说明各设计�
     要求 MSVC 风格命令行；GPU 侧亦无 nvcc / CUDA toolkit / triton。手写内核绕开 Inductor，已独立打通。
 12. **GPU 结论的边界**：加速比是未做 CUDA 侧优化的下界；无同行 GPU 对照，不构成"GPU 上性能竞争力"的证据。
 
-详见 **[docs/EXPERIMENT_REPORT.md](docs/EXPERIMENT_REPORT.md)** 与 **[safety_notice.md](safety_notice.md)**。
+详见 **[docs/EXPERIMENT_REPORT.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/EXPERIMENT_REPORT.md)** 与 **[safety_notice.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/safety_notice.md)**。
 模型为实验科研项目，中医相关输出不可作为医疗诊断依据。
 
 ---
@@ -947,6 +947,6 @@ docs/ARCHITECTURE.md 第 3/4/5 节。保留这些记录是为了说明各设计�
 
 ## 许可证
 
-[Apache License 2.0](LICENSE)
+[Apache License 2.0](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/LICENSE)
 
 Copyright 2026 sunny-cx
