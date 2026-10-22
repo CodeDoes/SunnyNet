@@ -1,0 +1,10 @@
+include LICENSE
+include README.md
+recursive-include sunnynet/runtime *.c *.h
+recursive-include sunnynet/kernels *.c *.h
+exclude docs/COMMUNITY_*.md
+exclude docs/DISCUSSIONS_*.md
+prune experiments
+prune data
+prune runs
+prune .ref

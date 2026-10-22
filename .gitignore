@@ -51,3 +51,8 @@ experiments/gguf/
 
 # 第三方参考实现 (仅本地对照用, 版权归原作者)
 .ref/
+
+# 构建产物
+dist/
+build/
+*.egg-info/

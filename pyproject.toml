@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sunnynet"
+dynamic = ["version"]
+description = "Original CPU-first sequence architecture with a standalone linear-recurrence inference runtime"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+authors = [{ name = "sunny-cx" }]
+keywords = ["deep-learning", "cpu", "linear-recurrence", "rwkv", "inference", "avx2"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: C",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.23",
+    "torch>=2.0",
+]
+
+[project.optional-dependencies]
+gguf = ["gguf>=0.9"]
+dev = ["pytest>=7.0", "build>=1.0", "twine>=4.0"]
+
+[project.urls]
+Homepage = "https://github.com/SunnyClaw-cx/SunnyNet"
+Repository = "https://github.com/SunnyClaw-cx/SunnyNet"
+Sponsor = "https://afdian.com/a/sunny-cx"
+
+[project.scripts]
+sunnynet = "sunnynet.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "sunnynet.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["sunnynet*"]
+
+[tool.setuptools.package-data]
+sunnynet = ["runtime/*.c", "runtime/*.h", "kernels/*.c", "kernels/*.h"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["ignore::UserWarning"]
