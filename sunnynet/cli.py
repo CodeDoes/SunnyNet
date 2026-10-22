@@ -202,6 +202,8 @@ def _main_hf(args) -> int:
         from .runtime.mamba2 import Mamba2 as Model
     elif args.hf_arch == "deltanet":
         from .runtime.deltanet import DeltaNet as Model
+    elif args.hf_arch == "gla":
+        from .runtime.gla import GLA as Model
     else:
         raise SystemExit(f"未支持的 --hf-arch: {args.hf_arch}")
 
@@ -302,8 +304,8 @@ def main(argv=None):
     ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
     ap.add_argument("--hf-dir", default=None,
-                    help="HF 权重目录 (Mamba-2 / DeltaNet), 与 --ckpt/--gguf 三选一")
-    ap.add_argument("--hf-arch", choices=["mamba2", "deltanet"], default="mamba2",
+                    help="HF 权重目录 (Mamba-2 / DeltaNet / GLA), 与 --ckpt/--gguf 三选一")
+    ap.add_argument("--hf-arch", choices=["mamba2", "deltanet", "gla"], default="mamba2",
                     help="--hf-dir 的架构")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")

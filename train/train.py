@@ -154,13 +154,16 @@ def lr_at(step: int, total: int, base_lr: float, warmup: int, min_ratio: float =
 @torch.no_grad()
 def evaluate(model, batches, device="cpu") -> float:
     model.eval()
+    dev = torch.device(device)
     tot, n = 0.0, 0
-    for x, y in batches:
-        logits = model(x)
-        loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
-        tot += float(loss)
-        n += y.numel()
+    with torch.no_grad():
+        for x, y in batches:
+            x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
+            logits = model(x)
+            loss = torch.nn.functional.cross_entropy(
+                logits.reshape(-1, logits.shape[-1]), y.reshape(-1), reduction="sum")
+            tot += float(loss)
+            n += y.numel()
     model.train()
     return tot / max(1, n)
 
@@ -190,11 +193,18 @@ def main():
     ap.add_argument("--ablation", type=str, default="", help="如 decay_gate=0,circulant=0")
     ap.add_argument("--mix", type=str, default="")
     ap.add_argument("--save-ckpt", type=str, default="")
+    ap.add_argument("--device", type=str, default="cpu",
+                    help="cpu 或 cuda (GPU 仅用于规模化训练, 结论不混 CPU 速度口径)")
     args = ap.parse_args()
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)
     th = torch.get_num_threads()
+
+    dev = torch.device(args.device)
+    if dev.type == "cuda" and not torch.cuda.is_available():
+        print("[warn] --device cuda 但 CUDA 不可用, 回退 cpu")
+        dev = torch.device("cpu")
 
     if args.kernel >= 0:
         from sunnynet.kernels.core_auto import set_kernel_active
@@ -220,6 +230,7 @@ def main():
 
     sunny, base, cfg = build_models(args.arch, vocab, args.preset, ablation, args.seq_len, args.seed, args.h_max)
     model = sunny if args.arch == "sunnynet" else base
+    model = model.to(dev)
     n_all = model.num_params()
     n_ne = model.num_params(non_embedding=True)
 
@@ -254,6 +265,7 @@ def main():
         for g in opt.param_groups:
             g["lr"] = lr
         x, y = mixer.batch()
+        x, y = x.to(dev, non_blocking=True), y.to(dev, non_blocking=True)
         t0 = time.perf_counter()
         logits = model(x)
         loss = torch.nn.functional.cross_entropy(logits.reshape(-1, vocab), y.reshape(-1))
@@ -261,6 +273,8 @@ def main():
         loss.backward()
         gn = float(torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip))
         opt.step()
+        if dev.type == "cuda":
+            torch.cuda.synchronize()
         dt = time.perf_counter() - t0
 
         ntok = x.numel()
@@ -273,7 +287,7 @@ def main():
 
         rec = None
         if (step + 1) % args.val_every == 0 or step == args.steps - 1:
-            vl = evaluate(model, val_batches)
+            vl = evaluate(model, val_batches, device=str(dev))
             t_eval = time.perf_counter() - t_start
             rec = {"step": step + 1, "train_loss": round(float(loss.detach()), 6),
                    "val_loss": round(vl, 6), "ppl": round(math.exp(min(vl, 20)), 4),
@@ -334,10 +348,11 @@ def main():
     if args.save_ckpt:
         cp = Path(args.save_ckpt)
         cp.parent.mkdir(parents=True, exist_ok=True)
-        torch.save({"arch": args.arch, "model": model.state_dict(),
+        sd = {k: v.detach().cpu() for k, v in model.state_dict().items()}
+        torch.save({"arch": args.arch, "model": sd,
                     "config": cfg.__dict__ if hasattr(cfg, "__dict__") else cfg,
                     "summary": log["summary"]}, cp)
-        print(f"    checkpoint -> {cp}")
+        print(f"    checkpoint -> {cp} ({cp.stat().st_size/1e6:.1f} MB)")
     return 0
 
 

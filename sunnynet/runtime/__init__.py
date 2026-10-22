@@ -8,6 +8,7 @@
     rwkv7     逐 head 矩阵 + rank-1 校正, GGUF 权重
     mamba2    逐 head 矩阵但衰减外积可分解, 退化为 SN_FMA
     deltanet  delta rule, 真 rank-1 校正, 需矩阵值递推
+    gla       只按 key 维衰减, 衰减可分解, 退化为元素级递推
 矩阵值递推 (rank-1) 不能由 SN_FMA 表达, 目前只有 numpy 参考路径。
 """
 from __future__ import annotations
@@ -27,6 +28,7 @@ MODELS = {
     "rwkv7": ("sunnynet.runtime.rwkv7", "RWKV7"),
     "mamba2": ("sunnynet.runtime.mamba2", "Mamba2"),
     "deltanet": ("sunnynet.runtime.deltanet", "DeltaNet"),
+    "gla": ("sunnynet.runtime.gla", "GLA"),
 }
 
 

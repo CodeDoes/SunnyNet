@@ -36,6 +36,9 @@ Sponsor = "https://afdian.com/a/sunny-cx"
 
 [project.scripts]
 sunnynet = "sunnynet.cli:main"
+sunnynet-serve = "sunnynet.serve:main"
+sunnynet-integrate = "sunnynet.integrate:main"
+sunnynet-release = "sunnynet.release:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "sunnynet.__version__" }

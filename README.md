@@ -275,6 +275,48 @@ smalln80）——窄残差流是已验证的缓解手段。
 （未做 CUDA 侧优化，是下界）。本机 GPU（GTX 1060 6GB）仅用于正确性验证与加速比测量，
 无同行 GPU 对照。
 
+### 100M 规模 GPU 训练与权重发布
+
+`p100mw`（d1408/i1920/r1024/L8，栈 93.83M / 总 105.36M）在 GTX 1060 6GB 上跑了
+2000 步真实训练（`zh_ancient` 0.4 / `en_literature` 0.35 / `code_python` 0.25，
+bs=2 × seq=256 × 2000 = 1,024,000 token，lr 1e-3 + 100 步 warmup）：
+
+| 步 | train loss | val loss | ppl |
+|---|---|---|---|
+| 200 | 5.8046 | 5.7407 | 311.29 |
+| 600 | 5.1452 | 5.3599 | 212.71 |
+| 1000 | 4.8508 | 5.1040 | 164.68 |
+| 1400 | 5.9248 | 4.8997 | 134.25 |
+| 2000 | 2.9600 | 4.7882 | **120.09** |
+
+val 单调下降、无发散，全程 **0.503 ms/token**（1987 tok/s），wall 583.5s，peak_rss 1302MB。
+
+**6GB 卡的可用配置只有 bs=2 × seq=256**（实测边界）：
+
+| 配置 | 结果 |
+|---|---|
+| bs=1 × 256 | 通过，1.220 ms/tok |
+| **bs=2 × 256** | **通过，0.744 ms/tok（最优）** |
+| bs=4 × 128 | 通过，0.818 ms/tok |
+| bs=4 × 256 / bs=8 × 128 | 训练后期 OOM |
+
+三条测量注意：`expandable_segments` 在 sm_61 上**不可用**，开启反而更早 OOM；
+显存被其他进程（如常驻的 Ollama）占用时 free 看似充足但分配失败，
+须先 `keep_alive: 0` 卸载；验证批次 `val-batches 8` 也会 OOM，降到 2 才稳定。
+
+权重打包由 `sunnynet-release` 完成（`dist/release/sunnynet-p100mw.*`）：
+
+| 产物 | 大小 | sha256 前 12 位 |
+|---|---|---|
+| `.pt` checkpoint | 467.7 MB | `399e604e635b` |
+| `.safetensors`（139 张量，绑定 head 已去重） | 421.5 MB | `12784fbfadf7` |
+| `.runtime.bin`（C Runtime fp32 布局） | 467.6 MB | `95c195e47637` |
+
+三者均验证可加载并生成：torch 后端 `"“H不得你，也不可不得…"`（143.6 ms/tok）、
+C 后端 `"「尚與子之子，雖以一名，於我也。"`（**80.2 ms/tok**）、
+OpenAI 服务经官方 SDK 四种调用方式全通过。**1520 步上限、单种子，
+不作"已收敛"或跨架构质量声明。**
+
 ### 0.5B 在 6GB 卡上的实测边界
 
 | 档位 | 峰值显存 | 结果 |
@@ -593,7 +635,132 @@ o_t = S_tᵀ q_t
 
 **矩阵值递推是唯一尚未进 C 的层级**：RWKV-7 与 DeltaNet 的状态更新都含
 `S ← S + k ⊗ (·)` 这类外积累加，`SN_FMA`/`SN_GATED` 的逐通道形式表达不了，
-需要新增一个 rank-1 递推内核；Mamba-2 因衰减外积可分解，不需要。
+需要新增一个 rank-1 递推内核；Mamba-2 与 GLA 因衰减外积可分解，不需要。
+
+**GLA**（`fla-hub/gla-340M-15B`，hidden 1024 / 24 层 / 4 head × 128，gate_rank 16）：
+
+```bash
+python -m sunnynet.cli --hf-dir <模型目录> --hf-arch gla \
+    --prompt "The capital of France is" --max-new 24 --stats
+```
+
+GLA 的门控 `gk = logsigmoid(·) / 16` 只作用在 key 维，衰减可分解为按行缩放，
+状态递推退化为元素级，与 Mamba-2 同类：
+
+```
+S_t = diag(exp(gk_t)) · S_{t-1} + k_t ⊗ v_t
+o_t = scale · S_tᵀ q_t,  scale = head_k_dim^{-1/2}
+```
+
+读出后接 `RMSNorm(o) · silu(g)`（先归一后乘门，`norm_before_gate=False`）。
+
+- 与独立参考实现 max|diff| **2.05e-05**，argmax **12/12**；分段续算 **逐位 0.0**。
+- 贪心续写 `"The capital of France is the city of Paris."`；`--stats` 下格确认。
+- 衰减可分解性由测试直接断言（`test_gla_decay_is_elementwise_decomposable`），
+  防止后续误当成矩阵值递推。
+
+### OpenAI 兼容 HTTP 服务（`sunnynet/serve.py`）
+
+零依赖实现（标准库 `http.server.ThreadingHTTPServer`，不引入 fastapi/flask），
+任何 OpenAI SDK 或客户端可直接指向本服务：
+
+```bash
+sunnynet-serve --ckpt <checkpoint.pt> --host 127.0.0.1 --port 8080
+sunnynet-serve --gguf <model.gguf> --gguf-backend c --port 8080   # RWKV-7
+sunnynet-serve --hf-dir <模型目录> --hf-arch gla --port 8080        # GLA
+```
+
+| 端点 | 说明 |
+|---|---|
+| `GET /v1/models` | 模型列表（`object=model`，`owned_by=sunnynet`） |
+| `POST /v1/chat/completions` | 支持 `stream: true`（SSE `data: {...}` + `data: [DONE]`） |
+| `POST /v1/completions` | 传统补全 |
+| `GET /health` | 存活探针 |
+
+后端选择走 `Engine` 抽象：`HFEngine` / `GGUFEngine` / `GGUFCEngine` / `TorchEngine`，
+采样（temperature / top-k / top-p）在服务侧统一处理。
+
+实测（本地启动后）：官方 `openai` SDK 的 `models.list`、chat 非流式、chat 流式、
+legacy completions 四种调用全部通过；400（缺字段）/ 404（未知路径）错误处理正常。
+
+### Ollama / LM Studio 接入（`sunnynet/integrate.py`）
+
+两者都跑 llama.cpp，接入前提是 GGUF 且架构被内置运行时支持。RWKV-7 GGUF 的
+`general.architecture=rwkv7`、`tokenizer.ggml.model=rwkv`，Ollama 直接识别
+（`family=rwkv7`、`parameter_size=191.13M`、`runner=llamacpp`）。
+
+```bash
+# 生成 Modelfile（默认只打印命令；--run 才真正导入）
+sunnynet-integrate ollama <model.gguf> --name sunnynet-rwkv7 --run --smoke
+# LM Studio：GGUF 放模型目录 + 生成接入配置
+sunnynet-integrate lmstudio --gguf <model.gguf> --models-dir <LM Studio models>
+```
+
+实测导入与生成：
+
+```bash
+OLLAMA_MODELS=<models> OLLAMA_HOST=127.0.0.1:11511 ollama serve &
+sunnynet-integrate ollama <model.gguf> --name sunnynet-rwkv7 --run --smoke
+# [smoke] OK: 'The capital of France is Paris.'
+```
+
+三个必须记录的坑：
+
+1. **必须显式写 TEMPLATE**。Ollama 内置的 `rwkv-world` 模板会在 prompt 外再包一层
+   `User: / Assistant:`，输出退化成复读（`-of-the-world-of-the-world-...`）。
+   写 `TEMPLATE """User: {{ .Prompt }}\n\nAssistant:"""` 后输出恢复
+   `" The capital of France is Paris."`，与自家 C runtime 逐字一致。
+2. **`Error: could not locate ollama app` 的真实含义是 server 未运行**。
+   `ollama create` 在 server 离线时会尝试拉起本地 app 并失败，报错文本具有误导性。
+   本工具先探活 `GET /api/version`，离线时直接给出 `ollama serve` 提示。
+3. **`OLLAMA_MODELS` 必须与 server 侧一致**。CLI 只设 `OLLAMA_HOST` 时 `create`
+   会把 blob 写进默认模型目录，与运行中的 server 目录错位。
+4. 本地探活须绕开系统 HTTP 代理（企业代理会把 `127.0.0.1` 拦成 502），
+   代码内用 `ProxyHandler({})` 构建 opener。
+
+LM Studio 无需 GGUF 转换的另一条路：把 `sunnynet-serve` 配成自定义 OpenAI 兼容
+endpoint（`Developer` → 添加 endpoint），配置由 `sunnynet-integrate lmstudio` 生成。
+
+### AVX-512 与 NEON 内核（`sunnynet/kernels/scan_avx512.c`、`scan_neon.c`）
+
+AVX2/FMA 之外补两条 SIMD 后端源码，均含前向扫描、反向扫描、单步三个入口。
+
+AVX-512（F/BW/VL）：用 `__mmask16` 做掩码尾处理，导出 CPUID 探测
+（leaf 7 EBX bit16）与 ISA 字符串。**本机 CPU 实测 AVX512F=0**（i7-8750H，Coffee Lake），
+故只做编译与产物验证，不做执行验证：
+
+| 验证项 | 结果 |
+|---|---|
+| 编译 | `gcc -O3 -mavx512f -mavx512bw -mavx512vl -shared` 通过 |
+| 反汇编 | 198 处 `zmm` 寄存器、16 处 `vfmadd132ps` |
+| 加载保护 | 不支持时 `load_avx512()` 直接抛错，避免非法指令 |
+
+NEON：无 ARM 工具链、无 QEMU（`wsl.exe` 被安全策略拦），改用 `zig cc` 真交叉编译：
+
+```bash
+pip install ziglang
+python -c "from sunnynet.kernels.simd import cross_compile_neon; cross_compile_neon('<out.so>')"
+```
+
+| 验证项 | 结果 |
+|---|---|
+| 产物 | AArch64 ELF64（`e_machine=183`，`zig cc -target aarch64-linux-gnu`） |
+| 反汇编 | capstone 确认 4-lane `fmla v3.4s, v2.4s, v4.4s` 及 `fmul`/`fsub`/`fadd` |
+
+**本机无法执行 NEON**，真实执行验证放在 CI 的 `ubuntu-24.04-arm` runner（原生 aarch64）。
+
+### 稳定 C ABI（`sunnynet/runtime/sn_abi.h`、`sn_abi.c`）
+
+此前的 C 接口是内部用的，改结构即破坏调用方。新增一层稳定 ABI 隔离：
+
+- 符号统一 `sn_abi_` 前缀，句柄不透明（`SnAbiRwkv7*`），调用方不依赖内部布局
+- 版本 `SN_ABI_VERSION = (MAJOR<<16)|(MINOR<<8)|PATCH`，当前 **1.0.0**
+- 能力位 `SN_CAP_*`、错误码 `SN_OK=0` / `SN_E_INVAL=-1` / `SN_E_UNSUPPORTED=-2` 等
+- `sn_status` 统一为 `int32_t`，函数只返回状态码，不做异常抛出
+
+ctypes 绑定在 `sunnynet/runtime/abi.py`，与内部句柄路径**逐位一致**
+（`max|diff| = 0.0`）。契约测试 9 项全绿（版本协商、能力位、错误码、
+`check(1)=OK` / `check(9)=E_UNSUPPORTED`、RWKV-7 步进等价）。详见 `docs/ABI.md`。
 
 ### 命令行
 
@@ -612,11 +779,23 @@ python -m sunnynet.cli --ckpt experiments/ckpts_ood/sunnynet.pt \
 python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
     --prompt "The Eiffel Tower is located in the city of" --max-new 40
 
-# 外部 HF 权重 (Mamba-2 / DeltaNet)
+# 外部 HF 权重 (Mamba-2 / DeltaNet / GLA)
 python -m sunnynet.cli --hf-dir <模型目录> --hf-arch mamba2 \
     --tokenizer-dir <GPT-NeoX tokenizer 目录> --prompt "def fibonacci(n):" --stats
 python -m sunnynet.cli --hf-dir <模型目录> --hf-arch deltanet \
     --prompt "The capital of France is" --max-new 20 --stats
+python -m sunnynet.cli --hf-dir <模型目录> --hf-arch gla \
+    --prompt "The capital of France is" --max-new 24 --stats
+
+# OpenAI 兼容服务
+sunnynet-serve --ckpt <checkpoint.pt> --port 8080
+
+# Ollama / LM Studio 接入配置
+sunnynet-integrate ollama <model.gguf> --name sunnynet-rwkv7
+sunnynet-integrate lmstudio --gguf <model.gguf>
+
+# 权重发布导出 (safetensors + runtime blob + 模型卡 + sha256)
+sunnynet-release <checkpoint.pt> --out-dir dist/release
 ```
 
 加载入口也可直接从 py 调用：
@@ -635,13 +814,16 @@ logits = m.step(token, st)                 # 每步 O(1)
 跨架构映射验证、**GGUF 只读 + RWKV-7 权重跑通（数值与官方 .pth 等价）**、
 **RWKV-7 整模型 C 内核（对 numpy 5.39×，8 线程 7.49×）**、
 **INT4 权重量化（端到端 2.83×，体积 2.7× 压缩）**、
-**Mamba-2 与 DeltaNet 官方权重接入（数值对齐 transformers，贪心生成连贯）**。
+**Mamba-2 / DeltaNet / GLA 官方权重接入（数值对齐参考实现，贪心生成连贯）**、
+**AVX-512 与 NEON 内核源码（交叉编译 + 反汇编验证）**、
+**OpenAI 兼容 HTTP 服务（`sunnynet-serve`）**、
+**Ollama / LM Studio 接入（`sunnynet-integrate`）**、
+**C API 稳定 ABI（`sunnynet/runtime/sn_abi.h`，版本化 + 能力位 + 错误码）**。
 
-近期：pip 发布（v0.1.0）、C API 稳定 ABI。
+近期：权重发布（`sunnynet-release`）。
 
 中期：补矩阵值递推（外积 / rank-1 校正）内核，把 RWKV-7 与 DeltaNet 的单步也搬进 C
-（Mamba-2 已可复用现有递推）；AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务；
-接入 Ollama / LM Studio。
+（Mamba-2 与 GLA 已可复用现有递推）。
 
 不做的：复刻 llama.cpp 的通用张量算子层（GGML 为 Transformer 设计，逐算子调度）；
 打平 Transformers / vLLM（分别为模型仓库与 GPU 服务赛道）。
@@ -656,17 +838,29 @@ sunnynet/
                   多尺度衰减 / 对数域并行扫描 / 通用门控扫描
   layers.py       SunnyBlock: 状态更新单元 + 循环滤波 + 局部卷积 + 非线性支路
   kernels/        AVX2 手写内核 (scan / 融合 core / 推理态单步) + 自动编译加载
+                  scan_avx512.c  AVX-512F/BW/VL 内核 (掩码尾处理 + CPUID 探测)
+                  scan_neon.c    ARM NEON 内核 (zig 交叉编译 / CI aarch64 执行)
+                  simd.py        AVX-512 / NEON 加载与交叉编译层
   linear_baselines.py  O(N) 同复杂度对照: 线性注意力 / RWKV / Mamba / Hyena / H3
   model.py        SunnyNet 主体 (状态 (B,L,D), 逐层接力)
   init.py         谱锚定初始化
   cli.py          命令行推理 (加载 ckpt -> 分词器 -> 自回归解码, --backend torch/c;
-                  --gguf 走外部 RWKV-7 权重)
+                  --gguf 走外部 RWKV-7 权重; --hf-dir 走 Mamba-2 / DeltaNet / GLA)
+  serve.py        OpenAI 兼容 HTTP 服务 (标准库实现, --host / --port)
+  integrate.py    Ollama / LM Studio 接入 (Modelfile 生成 + 探活 + GGUF 放置)
+  release.py      权重发布导出 (safetensors + runtime blob + 模型卡 + sha256)
   runtime/        独立 C 推理 Runtime
     recur.c         通用一阶递推内核 (扫描 / 反向 / 单步 / INT8 量化)
     sunnynet.c      整模型单步解码 (B=1, 无中间张量)
+    sn_abi.h/.c     稳定 ABI 层 (版本化 + 能力位 + 错误码 + 不透明句柄)
+    abi.py          ABI ctypes 绑定
     model.py        ctypes 绑定
     gguf.py         GGUF 只读加载 (f16/bf16/f32 + 量化反量化)
     rwkv7.py        RWKV-7 单步递推 (numpy 参考路径, 读 GGUF 权重)
+    rwkv7_c.py      RWKV-7 整模型 C 内核绑定
+    mamba2.py       Mamba-2 单步递推 (衰减外积可分解, 元素级)
+    deltanet.py     DeltaNet 单步递推 (真 rank-1 校正, 矩阵值)
+    gla.py          GLA 单步递推 (门控只在 key 维, 元素级)
   baseline.py     同参数量 Transformer 对照 (仅用于对照, 非架构本体)
   tokenizer.py    从零实现的 BPE 分词器
   profiling.py    真实性能探针 (峰值内存 / 访存 / 吞吐)
@@ -683,13 +877,19 @@ experiments/
 tests/
   test_architecture.py  架构自检 (分块一致性 / 因果性 / 梯度界 / 深度稳定, 63 项)
   test_runtime_model.py C 整模型解码一致性
+  test_runtime_hf.py    Mamba-2 / DeltaNet / GLA 外部权重接入
   test_rwkv7_gguf.py    GGUF 加载 / 张量对齐 / RWKV-7 递推等价 / 分词往返
+  test_abi.py           C API 稳定 ABI 契约 (版本 / 能力位 / 错误码 / 步进等价)
+  test_simd.py          AVX-512 编译产物 + NEON 交叉编译与反汇编
+  test_integrate.py     Ollama / LM Studio 接入 (Modelfile / 探活 / 目录布局)
+  test_release.py       权重发布导出 (safetensors 往返 / blob 头 / sha256)
   test_smoke_pipeline.py 端到端冒烟 (合成语料 -> 训练 -> 评估)
 prepare_data.py   真实语料采集
 build_corpus.py   分词器训练 + token 流构建
 docs/
   ARCHITECTURE.md  完整数学推导
   EXPERIMENT_REPORT.md 实测实验报告 (含负面结论)
+  ABI.md           C API 稳定 ABI 的版本策略 / 能力位 / 错误码
   figures/         实验图表
 ```
 

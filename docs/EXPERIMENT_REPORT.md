@@ -2549,7 +2549,123 @@ o_t = S_tᵀ q_t
 
 ---
 
-## 25. 完整复现
+## 25. 100M 规模训练、权重发布与 Agent 生态接入
+
+§15 只做到 0.5B 的**单步可行性**（SGD 能跑，AdamW OOM），没有多步收敛数据。
+本节补 `p100mw`（栈 93.83M / 总 105.36M）的真实多步训练，并把权重打包成可发布资产。
+
+### 25.1 训练
+
+协议：GPU（GTX 1060 6GB, sm_61）、bs=2 × seq=256 × 2000 步 = 1,024,000 token、
+lr 1e-3、warmup 100、cosine 衰减、AdamW、grad_clip 1.0、seed 1234、
+语料 `zh_ancient` 0.4 / `en_literature` 0.35 / `code_python` 0.25。
+
+| 步 | train loss | val loss | ppl | ms/tok |
+|---|---|---|---|---|
+| 200 | 5.8046 | 5.7407 | 311.29 | 0.501 |
+| 600 | 5.1452 | 5.3599 | 212.71 | 0.502 |
+| 1000 | 4.8508 | 5.1040 | 164.68 | 0.502 |
+| 1400 | 5.9248 | 4.8997 | 134.25 | 0.503 |
+| 1800 | 6.2203 | 4.8115 | 122.91 | 0.503 |
+| 2000 | 2.9600 | 4.7882 | **120.09** | 0.503 |
+
+val 单调下降、未发散；wall 583.5s；peak_rss 1301.6MB；最终 train loss 2.9600。
+train loss 逐格抖动大（val 稳定），是小 batch（×2）叠加语料域间差异的正常表现。
+
+**口径**：1.024M token 对 105M 参数而言是极欠训练（约 0.01 token/参数），
+本节**不声称收敛、不作跨架构质量对照**，只提供"能稳定下降 + 可加载生成"的证据。
+
+### 25.2 6GB 卡的配置边界
+
+| 配置 | 结果 |
+|---|---|
+| bs=1 × 256 | 通过，1.220 ms/tok |
+| **bs=2 × 256** | **通过，0.744 ms/tok（选为训练配置）** |
+| bs=4 × 128 | 通过，0.818 ms/tok |
+| bs=4 × 256 | 训练后期 OOM |
+| bs=8 × 128 | 训练后期 OOM |
+
+三条测量陷阱（均实测复现）：
+
+1. **`expandable_segments` 在 sm_61 上不可用**。加
+   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 后 OOM 出现得更早，
+   而非更晚。这与 §15 的记录一致。
+2. **显存被其他进程占用时，free 数值不可信**。常驻 Ollama 占 383 MiB 时，
+   名义 free 5649 MiB，但尝试分配 12 MiB 即失败；先 `keep_alive: 0` 卸载使
+   free 回到 6031 MiB 后恢复正常。这是 WDDM 分配器碎片，不是算术问题。
+3. **验证批次也吃显存**。`val-batches 8` 在 bs=2 下于验证阶段 OOM，
+   降到 2 后全程稳定。训练配置与验证配置需分别定界。
+
+### 25.3 权重打包与加载验证
+
+`sunnynet-release`（`sunnynet/release.py`）一次导出三类资产 + 模型卡 + sha256 清单：
+
+| 产物 | 大小 | sha256 前 12 位 |
+|---|---|---|
+| `sunnynet-p100mw.pt` | 467.7 MB | `399e604e635b` |
+| `sunnynet-p100mw.safetensors` | 421.5 MB | `12784fbfadf7` |
+| `sunnynet-p100mw.runtime.bin` | 467.6 MB | `95c195e47637` |
+
+safetensors 含 139 张量。**绑定嵌入（`tie_embeddings=True`）时 `head.weight` 与
+`embed.weight` 共享存储，safetensors 会拒绝保存并报 "Some tensors share memory"**；
+导出器摘掉 `head.weight` 并在 metadata 写 `sunnynet.tied_head=1`，加载方复用 embed 即可。
+
+三条加载路径实测（同一权重）：
+
+| 路径 | 输出 | 速度 |
+|---|---|---|
+| torch 后端 | `"“H不得你，也不可不得…"` | 143.6 ms/tok |
+| C Runtime（`.runtime.bin`） | `"「尚與子之子，雖以一名，於我也。"` | **80.2 ms/tok** |
+| OpenAI 服务（官方 SDK） | 四种调用方式全通过 | — |
+
+C 后端对 torch 后端的读数是单次（20 token），**不作加速比陈述**，只证明导出的
+blob 布局与内核期望一致、可独立于 PyTorch 加载。
+
+### 25.4 Agent 生态接入：Ollama 的三个坑
+
+RWKV-7 191M GGUF 经 Ollama 真实导入并生成成功（`family=rwkv7`、
+`parameter_size=191.13M`、`runner=llamacpp`、`tokenizer.ggml.model=rwkv`）。
+
+1. **必须显式写 TEMPLATE**。Ollama 内置 `rwkv-world` 模板会在 prompt 外再包一层
+   `User: / Assistant:`，同一 prompt 下输出退化为复读
+   （`"-of-the-world-of-the-world-of-..."`）。写入
+   `TEMPLATE """User: {{ .Prompt }}\n\nAssistant:"""` 后输出恢复
+   `" The capital of France is Paris."`，且与自家 C runtime 的 raw 输出**逐字一致**
+   ——证明问题在模板而非分词。
+2. **`Error: could not locate ollama app` 的真实含义是 server 未运行**。
+   `ollama create` 在 server 离线时会静默尝试拉起本地 app 并失败。已精确复现：
+   `OLLAMA_HOST` 指向空端口 → 该错；server 在线 → 正常。诊断脚本须先探活
+   `GET /api/version`，否则会把环境问题误判为安装损坏。
+3. **`OLLAMA_MODELS` 必须与 server 侧一致**。只设 `OLLAMA_HOST` 时 `create`
+   会把 blob 写进默认目录，与运行中的 server 目录错位。
+
+另有一条与环境相关的坑：本地探活须绕开系统 HTTP 代理。企业代理会把
+`http://127.0.0.1:...` 也拦成 **502**，Python 侧用 `urllib.request.ProxyHandler({})`
+构建 opener 才能拿到真实状态。
+
+LM Studio 本机未安装，只做了 GGUF 目录布局（`<models>/<publisher>/<repo>/<file>.gguf`，
+硬链接优先）与接入配置生成，**未做真实加载验证**。
+
+### 25.5 SIMD 后端的可验证边界
+
+AVX-512 与 NEON 后端都不是"写完就算"——本机 CPU 与工具链两处硬约束决定了
+能验证到哪一步。
+
+**AVX-512**：本机 i7-8750H（Coffee Lake）CPUID 实测 `AVX512F=0 / BW=0 / VL=0`，
+不可能执行。已验证：`gcc -mavx512f -mavx512bw -mavx512vl` 编译通过、
+objdump 确认 **198 处 `zmm` 寄存器 + 16 处 `vfmadd132ps`**、
+不支持时 `load_avx512()` 抛错（避免非法指令）。**未验证执行正确性。**
+
+**NEON**：无 ARM 工具链、无 QEMU（`wsl.exe` 被安全策略拦）。用
+`zig cc -target aarch64-linux-gnu` 真交叉编译出 AArch64 ELF64（`e_machine=183`），
+capstone 5.0.7 确认生成 4-lane `fmla v3.4s, v2.4s, v4.4s` 及 `fmul`/`fsub`/`fadd`。
+**未验证执行正确性**；执行验证放在 CI 的 `ubuntu-24.04-arm` runner。
+
+这一节的结论就是"产物存在且指令正确"，**不是性能结论**。
+
+---
+
+## 26. 完整复现
 
 ```bash
 # 1. 环境

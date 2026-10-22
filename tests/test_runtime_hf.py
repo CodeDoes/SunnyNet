@@ -1,4 +1,4 @@
-"""Mamba-2 / DeltaNet 统一 Runtime 的数值与等价性测试.
+"""Mamba-2 / DeltaNet / GLA 统一 Runtime 的数值与等价性测试.
 
 权重在 F 盘, 不在仓库内; 缺失时跳过, 不伪造结论。
 """
@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 # 权重体积大不入库; 用环境变量指向本地目录, 缺失则跳过相关用例。
 MAMBA = os.environ.get("SUNNY_MAMBA2", str(ROOT / "models" / "mamba2-130m"))
 DELTA = os.environ.get("SUNNY_DELTANET", str(ROOT / "models" / "deltanet-pure"))
+GLA_DIR = os.environ.get("SUNNY_GLA", "E:/sunnyclaw-data/models/gla-340M")
 
 skip_mamba = pytest.mark.skipif(
     not os.path.exists(os.path.join(MAMBA, "pytorch_model.bin")),
@@ -21,6 +22,9 @@ skip_mamba = pytest.mark.skipif(
 skip_delta = pytest.mark.skipif(
     not os.path.exists(os.path.join(DELTA, "model.safetensors")),
     reason="deltanet 权重不在本机")
+skip_gla = pytest.mark.skipif(
+    not os.path.exists(os.path.join(GLA_DIR, "model.safetensors")),
+    reason="gla 权重不在本机")
 
 
 @pytest.fixture(scope="module")
@@ -168,4 +172,74 @@ def test_deltanet_repeatable(dn):
     a = np.stack([dn.step(t, st) for t in ids])
     st2 = dn.reset(dn.init_state())
     b = np.stack([dn.step(t, st2) for t in ids])
+    assert np.abs(a - b).max() == 0.0
+
+
+# ------------------------------------------------------------------- GLA
+@pytest.fixture(scope="module")
+def gl():
+    from sunnynet.runtime.gla import GLA as GLAModel
+    return GLAModel(GLA_DIR)
+
+
+@skip_gla
+def test_gla_dims(gl):
+    assert gl.hidden == 1024
+    assert gl.n_layers == 24
+    assert gl.n_heads == 4
+    assert gl.head_k_dim == 128
+    assert gl.head_v_dim == 256
+    assert gl.key_dim == 512 and gl.value_dim == 1024
+    assert gl.gate_logit_normalizer == 16.0
+    assert gl.use_output_gate
+
+
+@skip_gla
+def test_gla_step_vs_segment(gl):
+    rng = np.random.default_rng(21)
+    ids = rng.integers(0, gl.vocab, size=16).tolist()
+    st = gl.reset(gl.init_state())
+    full = np.stack([gl.step(t, st) for t in ids])
+    st2 = gl.reset(gl.init_state())
+    seg = np.concatenate([np.stack([gl.step(t, st2) for t in ids[:7]]),
+                          np.stack([gl.step(t, st2) for t in ids[7:]])])
+    assert np.abs(full - seg).max() == 0.0
+
+
+@skip_gla
+def test_gla_decay_is_elementwise_decomposable(gl):
+    """只按 key 维衰减时, diag(exp(gk))·S 的乘法必须与逐行缩放逐位一致。
+
+    这决定了 GLA 不需要矩阵值递推层级: 若衰减含 value 维耦合, 本断言会失败。
+    """
+    rng = np.random.default_rng(22)
+    H, K, V = gl.n_heads, gl.head_k_dim, gl.head_v_dim
+    S = rng.standard_normal((H, K, V)).astype(np.float32)
+    gk = -rng.random((H, K)).astype(np.float32)
+    dec = np.exp(gk, dtype=np.float32)
+    lhs = dec[:, :, None] * S
+    rhs = np.stack([np.diag(dec[h]) @ S[h] for h in range(H)])
+    assert np.abs(lhs - rhs).max() < 1e-4
+
+
+@skip_gla
+def test_gla_greedy_is_coherent(gl):
+    """英文常识续写必须落到 'Paris', 作为端到端连通性判据."""
+    spm = pytest.importorskip("sentencepiece")
+    sp = spm.SentencePieceProcessor()
+    sp.Load(str(Path(GLA_DIR) / "tokenizer.model"))
+    prompt = [1] + sp.encode("The capital of France is", out_type=int)
+    gen = gl.generate(prompt, max_new=16, temperature=0.0)
+    text = sp.decode(gen)
+    assert "Paris" in text, text
+
+
+@skip_gla
+def test_gla_repeatable(gl):
+    rng = np.random.default_rng(23)
+    ids = rng.integers(0, gl.vocab, size=8).tolist()
+    st = gl.reset(gl.init_state())
+    a = np.stack([gl.step(t, st) for t in ids])
+    st2 = gl.reset(gl.init_state())
+    b = np.stack([gl.step(t, st2) for t in ids])
     assert np.abs(a - b).max() == 0.0
