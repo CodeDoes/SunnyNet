@@ -45,7 +45,7 @@ All numbers are measured on one machine (i7-8750H, AVX2, PyTorch 2.14.1 CPU) wit
 - Long-context decoding: single-step cost stays flat from T=256 to T=4096 (3.28 → 2.85 ms), while a parameter-matched Transformer climbs 2.55 → 6.22 ms. SunnyNet is 2.18× faster at T=4096. Against O(N) peers it is not the fastest — RWKV decodes 1.9–2.6× faster at every length.
 - Forward pass: crossover with a matched Transformer at T≈384 (6-layer) or T≈600 (4-layer). At T=4096 it is 22.7× faster per token. Against O(N) peers there is no length where it leads all of them.
 - Cross-distribution: on independently collected external data, 1st of 7 on Chinese tech news, 2nd of 7 on English arXiv abstracts.
-- Hand-written AVX2 kernel (competitive gating, gate probability, and scan fused into one pass): 1.10–1.17× on the training step, bit-identical loss. Needs a C compiler (w64devkit / GCC).
+- Hand-written AVX2 kernel (competitive gating, gate probability, and scan fused into one pass): 1.10–1.17× on the training step, bit-identical loss. Prebuilt in the wheel; a C compiler is only needed on the source path.
 
 ### Limitations
 
@@ -122,6 +122,10 @@ pip install numpy matplotlib pytest
 pip install sunnynet-cx          # 或 pip install -e . 从源码装
 ```
 
+从 PyPI 安装的 wheel 已内置预编译原生库（x86-64 且支持 AVX2+FMA 时生效），装完即可
+使用 C 内核，无需本机 C 编译器。其他平台或指令集不达标时退回源码编译，此时才需要
+下面的编译器。
+
 ### 1. 下载语料并构建 token 流
 
 ```bash
@@ -164,8 +168,9 @@ python experiments/make_figures.py
 python experiments/collect_results.py --out docs/_tables.md
 ```
 
-手写 AVX2 内核需 C 编译器（w64devkit / GCC）：
-将 `SUNNY_W64` 指向 w64devkit 根目录，或把 `gcc` 加入 PATH。
+手写 AVX2 内核需要 C 编译器（w64devkit / GCC），但只在源码路径下：从 PyPI 装的
+wheel 已带预编译库，或本机 CPU 不支持 AVX2+FMA 时才回退到编译。源码方式使用请将
+`SUNNY_W64` 指向 w64devkit 根目录，或把 `gcc` 加入 PATH。
 
 ```bash
 export SUNNY_W64=<w64devkit 解压目录>
@@ -400,8 +405,8 @@ ms/step（越低越好）：
 
 ## 线性架构的 CPU 推理 Runtime
 
-`sunnynet/runtime/` 是独立于 PyTorch 的 C 推理内核（AVX2/FMA + OpenMP），只依赖 ctypes
-与 C 编译器。它实现通用一阶递推
+`sunnynet/runtime/` 是独立于 PyTorch 的 C 推理内核（AVX2/FMA + OpenMP），运行期只依赖
+ctypes。原生库随 wheel 预编译分发，源码路径下才需要 C 编译器。它实现通用一阶递推
 
 ```
 s_t = a_t * s_{t-1} + b_t              (FMA)

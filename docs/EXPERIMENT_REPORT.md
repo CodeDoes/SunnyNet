@@ -2697,6 +2697,43 @@ o_t = S_tᵀ q_t
 - `state-spaces/mamba2-130m` 不含 tokenizer；用 Llama tokenizer（vocab 32000）喂
   50277 词表的模型会得到乱码，须另取 GPT-NeoX tokenizer（vocab 50254）。
 
+### 24.13 预编译原生库
+
+前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`）
+原本都在**首次调用时用本机 gcc 现编**，因此 `pip install` 之后仍需另装 C 编译器。
+本节把编译挪到 **wheel 构建期**：构建机上编好、产物随包分发，装机后直接加载。
+
+**产物布局**：`sunnynet/_prebuilt/<平台标签>/`，标签为 `win-x86_64`、`linux-x86_64`、
+`macos-arm64` 等（`sunnynet/_native.py` 的 `platform_tag()`）。加载器按当前平台标签
+查找；`locate()` 命中则直接 `CDLL`，未命中退回原有的源码编译路径——**对没有预编译
+产物的平台行为不变**。
+
+**指令集门槛**：库以 `-mavx2 -mfma -march=x86-64-v3` 编出，只有 x86-64 且支持
+AVX2+FMA 的机器能执行，故判定按**指令集**而非仅按平台（`isa_ok()`）。不达标的机器
+即使命中了产物也走源码编译，避免非法指令崩溃。
+
+**六库加载器改造**：各自抽出 `_bind(lib)` 绑定 argtypes，`load_*` 开头插入预编译
+短路，`*_available()` 同步放宽为「有编译器 **或** 有可用预编译库」。
+
+实测（Windows / i7-8750H，全部真机执行）：
+
+| 验证项 | 结果 |
+|---|---|
+| 预编译库 vs 源码编译库（`recur_scan` 同批输入） | out / send **max\|diff\| = 0.0，逐位相同** |
+| 无 gcc（PATH 精简、无 `SUNNY_W64`）加载六库 | 全部成功，`CDLL` 路径指向 `_prebuilt/win-x86_64/` |
+| 无 gcc + 源码树全量测试 | **115 passed / 21 skipped / exit 0** |
+| 同上，改造前 | 89 passed / 47 skipped / exit 0 |
+| 差值 26 的含义 | 原先因缺编译器**跳过**的用例现在真实执行 |
+| 完全隔离（无源码树、无 gcc、`PYTHONPATH` 指向安装目录） | **106 passed / 30 skipped / exit 0** |
+| 有 gcc + 源码树全量测试 | **126 passed / 10 skipped / exit 0**（无回归） |
+| wheel 内预编译产物 | 6 个 dll，wheel 总 55 文件，标签 `py3-none-win_amd64` |
+
+`SUNNY_NO_PREBUILT=1` 可强制关闭预编译短路，用于上表第一行的对照验证。
+
+含二进制时 wheel 打平台标签（`py3-none-win_amd64`）而非 `py3-none-any`，避免把 A 平台
+产物发给 B 平台；平台不匹配的机器由 pip 从 sdist 构建，源码路径完整可用。sdist 只由
+单一平台产出，`_prebuilt/` 不入 sdist（只带 C 源码）。
+
 ---
 
 ## 25. 100M 规模训练、权重发布与 Agent 生态接入
