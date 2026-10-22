@@ -14,8 +14,25 @@ CKPT = ROOT / "experiments/ckpts_ood/sunnynet.pt"
 BLOB = ROOT / "experiments/ckpts_ood/sunnynet.runtime.bin"
 
 
-@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
-                    reason="缺少 ckpt 或导出 blob")
+def _have_gcc() -> bool:
+    from shutil import which
+    import os
+    env = os.environ.get("SUNNY_W64")
+    if env:
+        p = Path(env) / "bin" / ("gcc.exe" if os.name == "nt" else "gcc")
+        if p.exists():
+            return True
+    return which("gcc") is not None
+
+
+NEED_GCC = pytest.mark.skipif(not _have_gcc(), reason="无 C 编译器")
+# 本机权重仅在开发机上存在; 有权重但无编译器时后端仍会抛 RuntimeError
+NEED_RUNTIME = pytest.mark.skipif(
+    not CKPT.exists() or not BLOB.exists() or not _have_gcc(),
+    reason="缺少 ckpt/blob 或 C 编译器")
+
+
+@NEED_RUNTIME
 def test_runtime_full_model_matches_torch_decode():
     """C 整模型逐 token 前向与 torch forward_step 数值一致, argmax 全同."""
     from sunnynet.cli import load_model
@@ -36,8 +53,7 @@ def test_runtime_full_model_matches_torch_decode():
             assert int(lg_t[0].argmax()) == int(lg_c.argmax())
 
 
-@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
-                    reason="缺少 ckpt 或导出 blob")
+@NEED_RUNTIME
 def test_runtime_prefill_equals_stepwise():
     """C 侧 prefill(n) 与逐步 step 的末 token logits 一致."""
     from sunnynet.cli import load_model
@@ -58,8 +74,7 @@ def test_runtime_prefill_equals_stepwise():
     assert float((lg_pref - last).abs().max()) < 1e-4
 
 
-@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
-                    reason="缺少 ckpt 或导出 blob")
+@NEED_RUNTIME
 def test_thread_count_does_not_change_logits():
     """线程数只影响耗时, 不得改变数值: 物理核与 1 线程结果须一致."""
     from sunnynet.cli import load_model
@@ -80,8 +95,7 @@ def test_thread_count_does_not_change_logits():
     assert float((a - b).abs().max()) < 1e-5, "并行 GEMV 引入数值差异"
 
 
-@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
-                    reason="缺少 ckpt 或导出 blob")
+@NEED_RUNTIME
 def test_rowmajor_layout_matches_export_order():
     """sn_load 把导出的 (in,out) 转置块翻成行主序后, 单步结果不变.
 
@@ -106,6 +120,7 @@ def test_rowmajor_layout_matches_export_order():
             assert int(lg_t[0].argmax()) == int(lg_c.argmax())
 
 
+@NEED_GCC
 def test_recommended_threads_is_physical_cores():
     """物理核探测落在合法范围内, 且 set_threads 往返生效."""
     import os
@@ -118,8 +133,7 @@ def test_recommended_threads_is_physical_cores():
     assert set_threads(n) == n
 
 
-@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
-                    reason="缺少 ckpt 或导出 blob")
+@NEED_RUNTIME
 def test_half_weights_track_fp32_argmax():
     """fp16 权重路径与 fp32 路径在同序列上 argmax 一致, logits 偏差有界.
 
@@ -150,8 +164,7 @@ def test_half_weights_track_fp32_argmax():
     assert n_agree == len(toks), f"argmax 仅 {n_agree}/{len(toks)} 一致"
 
 
-@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
-                    reason="缺少 ckpt 或导出 blob")
+@NEED_RUNTIME
 def test_half_weights_are_smaller_than_fp32():
     """fp16 载入后常驻权重应明显小于 fp32 (5 个 GEMV 矩阵 + head 减半)."""
     from sunnynet.cli import load_model

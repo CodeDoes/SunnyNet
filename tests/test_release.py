@@ -33,7 +33,7 @@ def test_sha256_of_matches_hashlib(tmp_path):
 
 
 def test_export_safetensors_roundtrip(ckpt, tmp_path):
-    from safetensors import safe_open
+    safe_open = pytest.importorskip("safetensors").safe_open
     info = release.export_safetensors(ckpt, tmp_path / "m.safetensors")
     assert info["tensors"] > 0 and info["params"] > 0
     assert info["tied_head"] is True
@@ -50,7 +50,7 @@ def test_export_safetensors_roundtrip(ckpt, tmp_path):
 
 
 def test_export_safetensors_all_tensors_finite(ckpt, tmp_path):
-    from safetensors import safe_open
+    safe_open = pytest.importorskip("safetensors").safe_open
     release.export_safetensors(ckpt, tmp_path / "m2.safetensors")
     with safe_open(str(tmp_path / "m2.safetensors"), framework="pt") as f:
         for k in f.keys():
@@ -78,6 +78,7 @@ def test_export_runtime_blob_rejects_bad_ablation(tmp_path, ckpt):
 
 
 def test_export_all_produces_manifest_with_hashes(ckpt, tmp_path):
+    pytest.importorskip("safetensors")
     card = release.export_all(ckpt, tmp_path / "out", "tiny")
     assert set(card["artifacts"]) == {"checkpoint", "safetensors", "runtime_fp32"}
     for k, v in card["artifacts"].items():
@@ -91,6 +92,7 @@ def test_export_all_produces_manifest_with_hashes(ckpt, tmp_path):
 
 
 def test_release_cli_writes_all(ckpt, tmp_path):
+    pytest.importorskip("safetensors")
     rc = release.main([str(ckpt), "--out-dir", str(tmp_path / "cli"),
                        "--name", "cliart"])
     assert rc == 0

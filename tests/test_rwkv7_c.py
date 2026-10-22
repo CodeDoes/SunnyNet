@@ -21,7 +21,20 @@ def _have():
     return GGUF.exists() and BLOB.exists()
 
 
-pytestmark = pytest.mark.skipif(not _have(), reason="缺少 gguf 包或 RWKV-7 权重/blob")
+def _have_toolchain():
+    """有 gguf 权重还不够: 无 C 编译器时后端 _load() 会抛 RuntimeError。"""
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+    try:
+        from sunnynet.runtime.rwkv7_c import rwkv7_available
+    except ImportError:
+        return False
+    return rwkv7_available()
+
+
+pytestmark = pytest.mark.skipif(
+    not (_have() and _have_toolchain()),
+    reason="缺少 gguf 包、RWKV-7 权重/blob, 或 C 编译器")
 
 PROMPT = "The Eiffel Tower is located in the city of"
 

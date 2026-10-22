@@ -22,6 +22,7 @@ skip_mamba = pytest.mark.skipif(
 skip_delta = pytest.mark.skipif(
     not os.path.exists(os.path.join(DELTA, "model.safetensors")),
     reason="deltanet 权重不在本机")
+# GLA 权重是 safetensors, 缺失依赖时同样跳过而不是让 fixture 抛错
 skip_gla = pytest.mark.skipif(
     not os.path.exists(os.path.join(GLA_DIR, "model.safetensors")),
     reason="gla 权重不在本机")
@@ -178,6 +179,7 @@ def test_deltanet_repeatable(dn):
 # ------------------------------------------------------------------- GLA
 @pytest.fixture(scope="module")
 def gl():
+    pytest.importorskip("safetensors")
     from sunnynet.runtime.gla import GLA as GLAModel
     return GLAModel(GLA_DIR)
 
