@@ -2790,12 +2790,17 @@ train loss 逐格抖动大（val 稳定），是小 batch（×2）叠加语料�
 | 产物 | 大小 | sha256 前 12 位 |
 |---|---|---|
 | `sunnynet-p100mw.pt` | 467.7 MB | `399e604e635b` |
-| `sunnynet-p100mw.safetensors` | 421.5 MB | `12784fbfadf7` |
+| `sunnynet-p100mw.safetensors` | 421.5 MB | `c7287c76ac8b` |
 | `sunnynet-p100mw.runtime.bin` | 467.6 MB | `95c195e47637` |
 
 safetensors 含 139 张量。**绑定嵌入（`tie_embeddings=True`）时 `head.weight` 与
 `embed.weight` 共享存储，safetensors 会拒绝保存并报 "Some tensors share memory"**；
 导出器摘掉 `head.weight` 并在 metadata 写 `sunnynet.tied_head=1`，加载方复用 embed 即可。
+
+导出后另做一次头部规范化：safetensors 0.8.0 序列化多键 metadata 时顺序不稳，同一
+checkpoint 连续导出会得到不同字节（数据段完全一致），发布 sha256 因此不可复现。导出器
+按 `sort_keys` 重写头部 JSON 并更新长度字段，数据段不动。实测未规范化六次导出得到六个
+哈希，规范化后六次全同。
 
 三条加载路径实测（同一权重）：
 

@@ -318,7 +318,7 @@ val 单调下降、无发散，全程 **0.503 ms/token**（1987 tok/s），wall 
 | 产物 | 大小 | sha256 前 12 位 |
 |---|---|---|
 | `.pt` checkpoint | 467.7 MB | `399e604e635b` |
-| `.safetensors`（139 张量，绑定 head 已去重） | 421.5 MB | `12784fbfadf7` |
+| `.safetensors`（139 张量，绑定 head 已去重） | 421.5 MB | `c7287c76ac8b` |
 | `.runtime.bin`（C Runtime fp32 布局） | 467.6 MB | `95c195e47637` |
 
 三者均验证可加载并生成：torch 后端 `"“H不得你，也不可不得…"`（143.6 ms/tok）、
