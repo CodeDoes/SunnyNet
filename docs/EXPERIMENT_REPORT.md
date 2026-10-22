@@ -2453,6 +2453,99 @@ C 内核 8 线程对 1 线程再快 1.39×（5/5）。**边界**：单线程单�
 - INT4 重量化矩阵方向：`gemv_i4` 要 `(out, in)`，而导出器写入的是 `(in, out)`，
   须在量化前转置，否则读取越界崩溃。
 
+### 24.12 外部权重接入：Mamba-2 与 DeltaNet
+
+`runtime/mamba2.py`、`runtime/deltanet.py`。同一 `step(token, state)` 接口加载另外两种
+线性架构的官方权重，逐 token 单步递推，前向不经 PyTorch。两套权重本机在 F 盘
+（`F:\sunnyclaw-data\models\`），不入库。
+
+**（1）Mamba-2**（`state-spaces/mamba2-130m`，d_model 768 / 24 层 / 24 head × 64）
+
+该 checkpoint 的 `config.json` 只有 `ssm_cfg: {"layer": "Mamba2"}`，**不含**维度超参，
+须按 `mamba_ssm` 的 `Mamba2` 默认值补齐（`ngroups=1`、`d_state=128`），此组合与
+`conv_dim = 1536 + 2·1·128 = 1792`、`nheads = 1536/64 = 24`、`A_log` 长度 24 三者自洽。
+`vocab_size` 实际 pad 到 50288。权重 219 张量。
+
+数学上每 head 状态是 `(head_dim=64, state_size=128)` 矩阵，但衰减 `dA = exp(dt·A)`
+对 `(p, n)` 全同、外积也可分解，故退化为元素级一阶递推，无需矩阵-向量乘积：
+
+```
+dA  = exp(dt_h · A_h)
+S_t = S_{t-1} ⊙ dA + (dt_h · B_g) ⊗ x_h
+```
+
+对照 `transformers` 的 `Mamba2ForCausalLM` 整段前向（`experiments/_mamba2_check.py`，
+24 token）：
+
+| 量 | 值 |
+|---|---|
+| max\|diff\| | 5.875e-04 |
+| mean\|diff\| | 6.003e-05 |
+| argmax 一致 | 24/24 |
+| 单步 vs 分段续算 | **0.0**（逐位） |
+
+5.9e-04 的量级需先排除公式错误：官方 **fp32** 自身相对 **fp64** 就偏离 **3.814e-04**
+（`mamba2_chunk_scan` 的 cumsum/segment\_sum 路径），而本实现相对 fp64 只偏离
+**2.518e-04**，**比官方 fp32 更接近真值**。⇒ 差异是单精度累积，不是数学错误。
+
+贪心续写（GPT-NeoX tokenizer，须从 `EleutherAI/gpt-neox-20b` 另取——该 checkpoint
+不含 tokenizer 文件）：
+
+```
+The capital of France is a city of the French people, and the capital of the French Republic.
+def fibonacci_2(n):\n    return n %
+```
+
+**（2）DeltaNet**（`fla-org` 的 DeltaNet 340M，hidden 1024 / 24 层 / 8 head × 128）
+
+338 张量。`use_beta=true`（headwise，`b_proj` 输出 8）、`qk_norm=l2`、`qk_activation=silu`、
+`use_short_conv=true`（q/k/v 各一路 kernel=4 深度卷积，无偏置）、`use_output_norm=true`
+（无门控 RMSNorm，`o_norm` 长度 128）、`use_gate=false`、`allow_neg_eigval=false`
+⇒ **无衰减门**，就是纯 delta rule。数学依据为 `fla/layers/delta_net.py` 的
+`fused_recurrent` 路径与 `fla/ops/delta_rule/fused_recurrent.py`：
+
+```
+δ_t = (v_t − S_{t-1}ᵀ k_t) · β_t
+S_t = S_{t-1} + k_t ⊗ δ_t
+o_t = S_tᵀ q_t
+```
+
+`S` 在本仓按 `(k_dim, v_dim)` 存，是标准写法的转置，写代码时用
+`kv = einsum("hkv,hk->hv", S, k)`、`o = einsum("hkv,hk->hv", S, q)`。
+
+检查（`experiments/_deltanet_check.py`）：
+
+| 检查 | 结果 |
+|---|---|
+| 秩 1 形式 vs 显式 `(I − β k kᵀ) S + β k vᵀ` | max\|diff\| **4.578e-05** |
+| 全程 vs 分段续算 | **0.0**（逐位） |
+| 重复运行 bit 稳定 | **0.0** |
+| 贪心续写 | `<s>The capital of France is the city of Paris. It is the largest city in Europe and the second largest in the world.` |
+
+**（3）速度**（`experiments/_hf_runtime_bench.py`，单线程 numpy 参考路径，
+每格独立子进程 × 5 轮交错，30 步中位）
+
+| 架构 | median ms/token | min | max |
+|---|---|---|---|
+| mamba2 | 45.68 | 38.27 | 55.42 |
+| deltanet | 91.46 | 83.93 | 99.19 |
+
+**这是参考路径的绝对耗时，不与任何基线比倍数。** 两者单步复杂度都是
+`O(heads × head_dim × state_size)`，与上下文长度无关。
+
+**（4）矩阵值递推层级仍未进 C**：RWKV-7 与 DeltaNet 的状态更新都含 `S ← S + k ⊗ (·)`
+这类外积累加，`SN_FMA` / `SN_GATED` 的逐通道形式表达不了；Mamba-2 因衰减外积可分解
+而不需要。这是本 Runtime 目前唯一尚未 C 化的递推层级。
+
+**（5）开发中定位的坑**
+- Mamba-2 的 `config.json` 缺 `state_size` / `n_groups`；`conv_dim` 只定出二者**乘积**
+  （`(conv_dim − d_inner)/2 = 128`），单看权重无法拆分。`(8,16)` / `(1,128)` / `(2,64)` / `(4,32)`
+  四种拆分与官方前向都吻合到同一量级，必须回到 `mamba_ssm` 默认值才能定案。
+- DeltaNet 的 `head_k_dim == head_v_dim == 128`，显式矩阵形式乘错一侧**不会报维度错**，
+  只会静默算成另一个式子（首轮检查因此得到 134.3 的假差异）。
+- `state-spaces/mamba2-130m` 不含 tokenizer；用 Llama tokenizer（vocab 32000）喂
+  50277 词表的模型会得到乱码，须另取 GPT-NeoX tokenizer（vocab 50254）。
+
 ---
 
 ## 25. 完整复现

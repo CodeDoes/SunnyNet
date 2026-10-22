@@ -3,6 +3,12 @@
 只依赖 ctypes 与 C 编译器, 不依赖 torch。递推形式:
     s_t = a_t * s_{t-1} + b_t          逐通道独立 (SN_FMA)
     s_t = a_t * s_{t-1} + (1-a_t)*u_t  门控形式   (SN_GATED)
+
+外部权重的单步递推走递推式而非分块扫描:
+    rwkv7     逐 head 矩阵 + rank-1 校正, GGUF 权重
+    mamba2    逐 head 矩阵但衰减外积可分解, 退化为 SN_FMA
+    deltanet  delta rule, 真 rank-1 校正, 需矩阵值递推
+矩阵值递推 (rank-1) 不能由 SN_FMA 表达, 目前只有 numpy 参考路径。
 """
 from __future__ import annotations
 
@@ -13,7 +19,24 @@ from pathlib import Path
 __all__ = [
     "runtime_available", "load_runtime", "FMA", "GATED",
     "scan", "scan_bwd", "step", "quant_i8", "dequant_i8", "TOOLCHAIN_HINT",
+    "MODELS", "load_model",
 ]
+
+# 外部权重架构注册表: 名字 -> (模块, 类)
+MODELS = {
+    "rwkv7": ("sunnynet.runtime.rwkv7", "RWKV7"),
+    "mamba2": ("sunnynet.runtime.mamba2", "Mamba2"),
+    "deltanet": ("sunnynet.runtime.deltanet", "DeltaNet"),
+}
+
+
+def load_model(arch: str, path, **kw):
+    """按架构名加载外部权重, 返回可直接 step(token, state) 的对象."""
+    if arch not in MODELS:
+        raise KeyError(f"未知架构 {arch!r}; 可用: {sorted(MODELS)}")
+    mod_name, cls_name = MODELS[arch]
+    import importlib
+    return getattr(importlib.import_module(mod_name), cls_name)(path, **kw)
 
 FMA = 0
 GATED = 1

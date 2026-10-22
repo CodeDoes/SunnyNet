@@ -194,6 +194,78 @@ def _main_gguf_c(args) -> int:
     return 0
 
 
+def _main_hf(args) -> int:
+    """HF 权重目录路径 (Mamba-2 / DeltaNet), 不经 PyTorch 前向."""
+    import numpy as np
+
+    if args.hf_arch == "mamba2":
+        from .runtime.mamba2 import Mamba2 as Model
+    elif args.hf_arch == "deltanet":
+        from .runtime.deltanet import DeltaNet as Model
+    else:
+        raise SystemExit(f"未支持的 --hf-arch: {args.hf_arch}")
+
+    t0 = time.perf_counter()
+    m = Model(args.hf_dir)
+    load_s = time.perf_counter() - t0
+
+    tk = None
+    if args.prompt:
+        try:
+            from transformers import AutoTokenizer
+            src = args.tokenizer_dir or args.hf_dir
+            tk = AutoTokenizer.from_pretrained(src)
+            ids = tk.encode(args.prompt, add_special_tokens=True)
+        except Exception as e:
+            # 部分 checkpoint (如 state-spaces/mamba2) 不含 tokenizer 文件
+            print(f"[warn] tokenizer 加载失败, 改按字节编码: {type(e).__name__}",
+                  file=sys.stderr)
+            tk = None
+            ids = [1] + [b + 2 for b in args.prompt.encode("utf-8")]
+    else:
+        ids = [1]
+
+    state = m.reset(m.init_state())
+    t0 = time.perf_counter()
+    logits = None
+    for t in ids:
+        logits = m.step(int(t), state)
+    prefill_s = time.perf_counter() - t0
+
+    out = list(ids)
+    step_times = []
+    for _ in range(args.max_new):
+        nxt = (int(np.argmax(logits)) if args.temperature <= 0
+               else _sample_np(logits, args.temperature, args.top_k))
+        out.append(nxt)
+        t0 = time.perf_counter()
+        logits = m.step(nxt, state)
+        step_times.append(time.perf_counter() - t0)
+    text = tk.decode(out) if tk is not None else ""
+    st = {
+        "backend": f"hf/{args.hf_arch}",
+        "load_ms": load_s * 1e3,
+        "prefill_tokens": len(ids),
+        "prefill_ms": prefill_s * 1e3,
+        "gen_tokens": len(step_times),
+        "decode_ms_per_token": (sum(step_times) / len(step_times) * 1e3
+                                if step_times else 0.0),
+    }
+    if args.json:
+        print(json.dumps({"prompt": args.prompt, "text": text,
+                          "arch": args.hf_arch, "stats": st},
+                         ensure_ascii=False, indent=2))
+    else:
+        sys.stdout.write(text)
+        print()
+        if args.stats:
+            print(f"[{args.hf_arch} L{m.n_layers} backend hf/numpy]")
+            print(f"[load {st['load_ms']:.1f} ms; prefill {st['prefill_tokens']} tok "
+                  f"{st['prefill_ms']:.1f} ms; decode {st['gen_tokens']} tok "
+                  f"{st['decode_ms_per_token']:.2f} ms/tok]")
+    return 0
+
+
 def _sample_np(logits, temperature: float, top_k: int) -> int:
     import numpy as np
     z = logits.astype(np.float64) / temperature
@@ -219,6 +291,8 @@ def main(argv=None):
     ap.add_argument("--top-p", type=float, default=0.95)
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--tokenizer", default=str(TOKENIZER))
+    ap.add_argument("--tokenizer-dir", default=None,
+                    help="--hf-dir 时另指定 tokenizer 来源目录")
     ap.add_argument("--threads", type=int, default=0, help="0 = 不限制")
     ap.add_argument("--backend", choices=["torch", "c"], default="torch",
                     help="c = 纯 C 整模型单步 (需先导出 .runtime.bin)")
@@ -227,16 +301,22 @@ def main(argv=None):
     ap.add_argument("--blob", default=None, help="--backend c 的权重 blob 路径")
     ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
+    ap.add_argument("--hf-dir", default=None,
+                    help="HF 权重目录 (Mamba-2 / DeltaNet), 与 --ckpt/--gguf 三选一")
+    ap.add_argument("--hf-arch", choices=["mamba2", "deltanet"], default="mamba2",
+                    help="--hf-dir 的架构")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     args = ap.parse_args(argv)
 
+    if args.hf_dir:
+        return _main_hf(args)
     if args.gguf:
         if args.gguf_backend == "c":
             return _main_gguf_c(args)
         return _main_gguf(args)
     if not args.ckpt:
-        raise SystemExit("需要 --ckpt 或 --gguf")
+        raise SystemExit("需要 --ckpt / --gguf / --hf-dir 之一")
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)

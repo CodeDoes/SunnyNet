@@ -533,6 +533,65 @@ INT4 端到端 **2.83×**（5/5 逐轮占优），体积 2.7× 压缩。整数�
 
 CLI：`--quant int4`（配合 `--gguf-backend c`）。
 
+### 外部权重：Mamba-2 与 DeltaNet（`sunnynet/runtime/mamba2.py`、`deltanet.py`）
+
+同一套 Runtime 接口加载另外两种线性架构的官方权重，逐 token 单步递推，不经 PyTorch 前向。
+
+**Mamba-2**（`state-spaces/mamba2-130m`，d_model 768 / 24 层 / 24 head × 64）：
+
+```bash
+python -m sunnynet.cli --hf-dir <模型目录> --hf-arch mamba2 \
+    --tokenizer-dir <GPT-NeoX tokenizer 目录> --prompt "def fibonacci(n):" --stats
+```
+
+每个 head 状态是 `(head_dim=64, state_size=128)` 矩阵，但衰减 `dA = exp(dt·A)` 对
+`(p, n)` 全同，外积也可分解，实际退化为元素级一阶递推：
+
+```
+dA  = exp(dt_h · A_h)                    # 标量
+S_t = S_{t-1} ⊙ dA + (dt_h · B_g) ⊗ x_h  # 无需矩阵-向量乘积
+```
+
+- 与 `transformers` 的 `Mamba2ForCausalLM` 整段前向 max|diff| **5.9e-04**、argmax **24/24**。
+  官方 fp32 自身相对 fp64 偏离 **3.8e-04**，本实现偏离 **2.5e-04**（更接近 fp64 真值）
+  ⇒ 差异是单精度累积，非公式错误。
+- 分段续算 vs 全程 **逐位 0.0**；贪心续写英文与代码连贯。
+
+**DeltaNet**（`fla-org` 的 DeltaNet 340M，hidden 1024 / 24 层 / 8 head × 128，短卷积 4）：
+
+```bash
+python -m sunnynet.cli --hf-dir <模型目录> --hf-arch deltanet \
+    --prompt "The capital of France is" --stats
+```
+
+真 delta rule，状态 `(k_dim=128, v_dim=128)`，更新含 rank-1 校正：
+
+```
+δ_t = (v_t − S_{t-1}ᵀ k_t) · β_t
+S_t = S_{t-1} + k_t ⊗ δ_t
+o_t = S_tᵀ q_t
+```
+
+- 秩 1 形式与显式 `(I − β k kᵀ) S + β k vᵀ` 写法的独立实现 **max|diff| 4.6e-05**
+  （fp32 累积量级）。注意 `head_k_dim == head_v_dim` 时把 `S` 乘错一侧不会报维度错，
+  只会静默算成另一个式子，故两种写法必须分开验证。
+- 分段续算 vs 全程 **逐位 0.0**；贪心输出
+  `"<s>The capital of France is the city of Paris. It is the largest city in Europe…"`。
+
+**速度（单线程 numpy 参考路径，每格独立子进程 × 5 轮）**：
+
+| 架构 | median ms/token | min | max | 状态 |
+|---|---|---|---|---|
+| mamba2 | 45.68 | 38.27 | 55.42 | 元素级递推，**可搬进 C 内核复用 `recur.c`** |
+| deltanet | 91.46 | 83.93 | 99.19 | 矩阵值 rank-1 递推，**现有内核无法表达** |
+
+这是参考路径的绝对耗时，**不与任何基线比倍数**。两者的单步安全上界都是
+`O(heads × head_dim × state_size)`，与上下文长度无关。
+
+**矩阵值递推是唯一尚未进 C 的层级**：RWKV-7 与 DeltaNet 的状态更新都含
+`S ← S + k ⊗ (·)` 这类外积累加，`SN_FMA`/`SN_GATED` 的逐通道形式表达不了，
+需要新增一个 rank-1 递推内核；Mamba-2 因衰减外积可分解，不需要。
+
 ### 命令行
 
 ```bash
@@ -549,6 +608,21 @@ python -m sunnynet.cli --ckpt experiments/ckpts_ood/sunnynet.pt \
 # 外部 GGUF 权重 (RWKV-7)
 python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
     --prompt "The Eiffel Tower is located in the city of" --max-new 40
+
+# 外部 HF 权重 (Mamba-2 / DeltaNet)
+python -m sunnynet.cli --hf-dir <模型目录> --hf-arch mamba2 \
+    --tokenizer-dir <GPT-NeoX tokenizer 目录> --prompt "def fibonacci(n):" --stats
+python -m sunnynet.cli --hf-dir <模型目录> --hf-arch deltanet \
+    --prompt "The capital of France is" --max-new 20 --stats
+```
+
+加载入口也可直接从 py 调用：
+
+```python
+from sunnynet.runtime import load_model
+m = load_model("deltanet", "<模型目录>")   # 或 "mamba2" / "rwkv7"
+st = m.reset(m.init_state())
+logits = m.step(token, st)                 # 每步 O(1)
 ```
 
 ### 路线
@@ -557,12 +631,13 @@ python -m sunnynet.cli --gguf experiments/gguf/rwkv7-191M-world-bf16.gguf \
 （对向量化基线中位 9.9×）、**C 整模型单步解码（B=1 单线程 1.53–2.05×）**、
 跨架构映射验证、**GGUF 只读 + RWKV-7 权重跑通（数值与官方 .pth 等价）**、
 **RWKV-7 整模型 C 内核（对 numpy 5.39×，8 线程 7.49×）**、
-**INT4 权重量化（端到端 2.83×，体积 2.7× 压缩）**。
+**INT4 权重量化（端到端 2.83×，体积 2.7× 压缩）**、
+**Mamba-2 与 DeltaNet 官方权重接入（数值对齐 transformers，贪心生成连贯）**。
 
 近期：pip 发布（v0.1.0）、C API 稳定 ABI。
 
-中期：补矩阵值递推（外积 / rank-1 校正）覆盖 RWKV-7、DeltaNet、GLA 这类
-（IR 已支持，缺模型加载与权重转换）；AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务；
+中期：补矩阵值递推（外积 / rank-1 校正）内核，把 RWKV-7 与 DeltaNet 的单步也搬进 C
+（Mamba-2 已可复用现有递推）；AVX-512 与 NEON 后端；OpenAI 兼容 HTTP 服务；
 接入 Ollama / LM Studio。
 
 不做的：复刻 llama.cpp 的通用张量算子层（GGML 为 Transformer 设计，逐算子调度）；

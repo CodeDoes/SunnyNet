@@ -5,6 +5,9 @@ runs/
 # 实验权重 (由 _ood.py 等脚本重新训练生成)
 experiments/ckpts_ood/
 
+# 基准输出 (由 experiments 脚本重新生成)
+results/
+
 # Python
 __pycache__/
 *.py[cod]
