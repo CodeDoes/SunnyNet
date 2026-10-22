@@ -30,15 +30,7 @@ jobs:
       - name: Show prebuilt contents
         shell: bash
         run: |
-          python - <<'PY'
-          import zipfile, glob
-          for f in glob.glob("dist/*.whl"):
-              z = zipfile.ZipFile(f)
-              pb = [n for n in z.namelist() if "_prebuilt" in n]
-              print(f, "->", len(pb), "prebuilt")
-              for n in pb:
-                  print("   ", n)
-          PY
+          python -c "import zipfile,glob; [print(f,'->',sum('_prebuilt' in n for n in zipfile.ZipFile(f).namelist()),'prebuilt') for f in glob.glob('dist/*.whl')]"
       - name: Check metadata
         run: |
           python -m pip install twine
