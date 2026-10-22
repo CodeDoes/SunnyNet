@@ -2769,6 +2769,28 @@ AVX2+FMA 的机器能执行，故判定按**指令集**而非仅按平台（`isa
 产物发给 B 平台；平台不匹配的机器由 pip 从 sdist 构建，源码路径完整可用。sdist 只由
 单一平台产出，`_prebuilt/` 不入 sdist（只带 C 源码）。
 
+**产物与源码的一致性检测**。开发态下改了 C 源码但不重编，加载器会静默命中旧的预编译
+库——本轮开发中真实发生过：`sn_mat_scan` 编译通过，Python 侧却报 `AttributeError`，
+因为命中的是改动前的 `sunnynet_runtime.dll`。故 `build_prebuilt()` 额外写出
+`_prebuilt/<标签>/sources.sha256`（按库分组的源码内容哈希），`locate()` 载入前比对。
+
+判定用**内容哈希而非 mtime**：pip 解包会把源码 mtime 刷成解包时刻、恒新于产物，
+按时间判会把装好的包一律判成过期。手动篡改清单中 `runtime/recur.c` 的哈希后，
+`locate()` 六个库全部返回 `None`（回退源码编译）；恢复后重新命中。
+
+开销：Windows 实时防护下进程内首次打开文件约 14–20 ms，之后约 0.4 ms；一次载入只
+比对该库用到的 2–5 个源文件，故一次性约 70 ms，远小于源码编译的数秒。源码没随包
+分发时无法判定，按不过期处理。契约测试 `tests/test_native_prebuilt.py`（5 项）。
+
+隔离验证（无源码树、无 gcc、`PYTHONPATH` 指向安装目录）：
+
+| 检查 | 结果 |
+|---|---|
+| 六个库 `locate()` | 全部命中 `_prebuilt/win-x86_64/` |
+| `load_runtime()` 实际加载路径 | 指向安装目录下的 `sunnynet_runtime.dll` |
+| `prebuilt_stale()`（含清单） | False——内容哈希一致，未误判过期 |
+| 隔离环境调用 `mat_step` | max\|diff\| 1.43e-06（对 numpy 参考） |
+
 ---
 
 ## 25. 100M 规模训练、权重发布与 Agent 生态接入

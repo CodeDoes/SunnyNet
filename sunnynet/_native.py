@@ -16,7 +16,7 @@ from pathlib import Path
 
 __all__ = [
     "PREBUILT", "platform_tag", "cpu_flags", "isa_ok",
-    "locate", "build_prebuilt", "MODULES",
+    "locate", "build_prebuilt", "MODULES", "SOURCES",
 ]
 
 HERE = Path(__file__).resolve().parent
@@ -31,6 +31,20 @@ MODULES = (
     "sunnynet.runtime.abi",
     "sunnynet.kernels",
 )
+
+# 每个预编译库的输入源码 (相对 HERE)。随包分发, 用于判定产物是否过期。
+SOURCES = {
+    "sunnynet.runtime": ("runtime/recur.c", "runtime/recur.h"),
+    "sunnynet.runtime.model": ("runtime/sunnynet.c", "runtime/sunnynet.h"),
+    "sunnynet.runtime.rwkv7_c": ("runtime/rwkv7.c", "runtime/rwkv7.h",
+                                 "runtime/quant.c"),
+    "sunnynet.runtime.quant": ("runtime/quant.c", "runtime/quant.h"),
+    "sunnynet.runtime.abi": ("runtime/sn_abi.c", "runtime/sn_abi.h",
+                             "runtime/recur.c", "runtime/rwkv7.c",
+                             "runtime/quant.c"),
+    "sunnynet.kernels": ("kernels/scan_avx2.c", "kernels/core_avx2.c",
+                         "kernels/step_avx2.c"),
+}
 
 
 def _machine() -> str:
@@ -94,12 +108,90 @@ def find(name: str) -> Path | None:
     return p if p.is_file() else None
 
 
+def _sha256(p: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(p, "rb") as f:
+        for blk in iter(lambda: f.read(1 << 16), b""):
+            h.update(blk)
+    return h.hexdigest()
+
+
+def _manifest_path() -> Path:
+    return PREBUILT / platform_tag() / "sources.sha256"
+
+
+def all_sources() -> tuple[str, ...]:
+    return tuple(sorted({s for srcs in SOURCES.values() for s in srcs}))
+
+
+def _read_manifest() -> dict:
+    import json
+
+    p = _manifest_path()
+    if not p.is_file():
+        return {}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+_STALE_CACHE = {}
+
+
+def prebuilt_stale(shlib_name: str | None = None) -> bool:
+    """包内产物是否与同包源码不一致。
+
+    比对内容哈希而非 mtime: pip 解包会把源码 mtime 刷成解包时刻, 恒新于产物,
+    按时间判会把装好的包一律判成过期。源码没随包分发时无法判定, 按不过期处理。
+
+    shlib_name 为 None 时检查全部库 (需 import 各模块), 否则只查清单里该库的条目
+    ——不 import 任何模块, 少读文件: Windows 实时防护下每次打开约 6 ms。
+    """
+    if shlib_name is None:
+        return any(prebuilt_stale(n) for n in _dll_names())
+    if shlib_name in _STALE_CACHE:
+        return _STALE_CACHE[shlib_name]
+    man = _read_manifest().get(shlib_name) or {}
+    stale = False
+    for rel, want in man.items():
+        p = HERE / rel
+        if p.is_file() and _sha256(p) != want:
+            stale = True
+            break
+    _STALE_CACHE[shlib_name] = stale
+    return stale
+
+
+def _dll_names() -> tuple[str, ...]:
+    out = []
+    for name in MODULES:
+        d = _dll_of(name)
+        if d:
+            out.append(d)
+    return tuple(out)
+
+
+def _dll_of(mod_name: str) -> str | None:
+    import importlib
+
+    try:
+        return importlib.import_module(mod_name).DLL.name
+    except Exception:
+        return None
+
+
 def locate(shlib_name: str) -> Path | None:
     """预编译库可加载则返回路径, 否则 None (调用方退回源码编译)。
 
     设 SUNNY_NO_PREBUILT=1 可强制走源码路径, 用于对照验证。
+    开发态下源码改过则判过期, 避免静默加载旧库 (见 prebuilt_stale)。
     """
     if os.environ.get("SUNNY_NO_PREBUILT") == "1" or not isa_ok():
+        return None
+    if prebuilt_stale(shlib_name):
         return None
     return find(shlib_name)
 
@@ -107,10 +199,12 @@ def locate(shlib_name: str) -> Path | None:
 def build_prebuilt(out_dir: str | Path | None = None):
     """编译全部原生库并复制到 _prebuilt/<平台标签>/。
 
+    同时写出 sources.sha256 清单, 供运行期判定产物是否与源码一致。
     返回 (产物列表, 错误说明)。当前 C 运行时用 -mavx2 编出, 只有 x86-64 能编;
     其他架构返回空列表并说明, 由调用方决定是否视为失败。
     """
     import importlib
+    import json
 
     if _machine() != "x86_64":
         return [], f"{_machine()} 不是 x86-64, 该架构无预编译产物"
@@ -129,4 +223,13 @@ def build_prebuilt(out_dir: str | Path | None = None):
         dst = out / mod.DLL.name
         shutil.copy2(mod.DLL, dst)
         made.append(dst)
+
+    man = {}
+    for name in MODULES:
+        dll = importlib.import_module(name).DLL.name
+        man[dll] = {rel: _sha256(HERE / rel) for rel in SOURCES[name]
+                    if (HERE / rel).is_file()}
+    man_p = out / "sources.sha256"
+    man_p.write_text(json.dumps(man, indent=1, sort_keys=True), encoding="utf-8")
+    made.append(man_p)
     return made, None

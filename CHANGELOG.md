@@ -12,6 +12,14 @@
 - 算子级 8×128×128 为 numpy 的 **4.25×**；但实测只占 DeltaNet 单步 **2.2%**，
   不能据此声称端到端加速——剩余时间在逐层 GEMV。
 
+### 预编译库与源码一致性
+- `build_prebuilt()` 写出 `_prebuilt/<平台>/sources.sha256`（按库分组的源码内容哈希），
+  `locate()` 载入前比对；源码改过但没重编时不再静默命中旧库，直接回退源码编译
+  （开发中真实踩到：`sn_mat_scan` 已编入源码却报 `AttributeError`）。
+- 比对内容哈希而非 mtime——pip 解包会把源码 mtime 刷成解包时刻，按时间判会恒判过期。
+  隔离安装实测六库全命中、`prebuilt_stale()` 为 False。
+- 契约测试 `tests/test_native_prebuilt.py`（5 项）。
+
 ### fp16 权重解码路径
 - 新增 `sn_load_h()`：载入时把 5 个 GEMV 矩阵与 LM head 截断为 fp16，小参数仍 fp32；
   单步实读 467.6 → 约 222.3 MB。内核 `gemv_h` 一次读 16 个 half（32 B）后转 fp32 做
