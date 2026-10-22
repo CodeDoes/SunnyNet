@@ -2,6 +2,16 @@
 
 ## v0.2.0
 
+### 推理 Runtime 访存重构
+- 整模型 C 解码的权重在 `sn_load` 时翻成行主序 `(out,in)`，GEMV 改为按输出通道
+  并行、每行连续读。导出格式不变，已发布的 blob 无需重导。
+- `p100mw`（105.36M）单步解码 76.60 → **25.72 ms/token**（**2.98×**，5 轮交错
+  5/5 占优），有效带宽 6.10 → 18.18 GB/s。对优化前 logits max|diff| 2.766e-05、
+  argmax 32/32。
+- 并行度取物理核而非逻辑核（解码访存受限）：6 核 26.69 ms vs 12 逻辑核 36.05 ms。
+  新增 `sn_recommended_threads()` 与 `sunnynet.runtime.model.set_threads()`；
+  CLI 在 `--backend c` 且未指定 `--threads` 时自动采用物理核数。
+
 ### 外部权重
 - GLA 接入（`sunnynet/runtime/gla.py`）：门控只在 key 维，衰减可分解为按行缩放
   ⇒ 元素级递推，不需要矩阵值层级。对独立参考实现 max|diff| 2.05e-05、argmax 12/12、

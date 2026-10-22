@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import BUILD, HERE, _find_gcc, compile_flags, shlib_name
 
-__all__ = ["SnModel", "model_available"]
+__all__ = ["SnModel", "model_available", "set_threads", "get_threads"]
 
 DLL = BUILD / shlib_name("sunnynet_model")
 
@@ -55,8 +55,35 @@ def _load():
     lib.sn_vocab.restype = I
     lib.sn_ready.argtypes = [V]
     lib.sn_ready.restype = I
+    lib.sn_set_threads.argtypes = [I]
+    lib.sn_get_threads.restype = I
+    if hasattr(lib, "sn_recommended_threads"):
+        lib.sn_recommended_threads.restype = I
     _lib = lib
     return lib
+
+
+def set_threads(n: int) -> int:
+    """设置 C runtime 的 GEMV 并行度; n<=0 维持默认。返回生效线程数。"""
+    lib = _load()
+    lib.sn_set_threads(int(n))
+    return lib.sn_get_threads()
+
+
+def get_threads() -> int:
+    return _load().sn_get_threads()
+
+
+def recommended_threads() -> int:
+    """物理核数; C 侧探测失败时回退到逻辑核的一半。"""
+    lib = _load()
+    if not hasattr(lib, "sn_recommended_threads"):
+        return 0
+    n = int(lib.sn_recommended_threads())
+    if n <= 0:
+        import os
+        n = max(1, (os.cpu_count() or 2) // 2)
+    return n
 
 
 class SnModel:

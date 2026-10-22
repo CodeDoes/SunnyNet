@@ -2310,6 +2310,83 @@ fp32 blob：矩阵乘权重预转置 `(in, out)` 配合 GEMV（一次 AVX2 load 
 **开发中定位到的一个真实 bug（已修）**：mingw 的 `fopen` 走 ANSI 代码页，含中文的
 Windows 路径打不开权重文件；C 侧改用 `_wfopen` + `MultiByteToWideChar(CP_UTF8)`。
 
+### 24.7b 整模型 C 解码的访存重构
+
+`p100mw`（105.36M 参数，fp32 blob 467.6 MB）在 C 后端单步 80.2 ms，与 20M 级模型
+（§24.7 的 1.4M ckpt 约 2 ms/step）不在一个量级。定位下来不在算子，在**权重布局**。
+
+**先量访存上限**。单步解码至少要读一遍全部权重，因此耗时下界是
+`blob 字节数 / 可达带宽`。写 `experiments/bench_bw.c` 用 AVX2 顺序读 419 MB
+（纯读、不写、取 5 轮最优）：
+
+| 线程 | 顺序读带宽 |
+|---|---|
+| 1 | 15.70 GB/s |
+| 2 | 21.57 GB/s |
+| 4 | 23.46 GB/s |
+| 8 | 25.31 GB/s |
+
+同期 `experiments/_bench_runtime_bandwidth.py` 量到 C runtime 单步 75.75 ms，
+有效带宽只有 **6.17 GB/s** —— 是单线程下界的 1.08×、多线程下界的 1/4。
+（注意：numpy 的 `a.sum()` 只量到 6.69 GB/s，会低估本机带宽，是早期误判的来源；
+该脚本里的带宽对照因此只作量级参考。）
+
+**原因是访问模式**。原实现的 GEMV 沿输出通道分块，内层遍历 `in` 时按 `out` 步长跨读：
+
+```c
+for (; j + 8 <= out; j += 8) {
+    const float* row = Wt + j;
+    for (int i = 0; i < in; ++i)
+        acc = _mm256_fmadd_ps(b, _mm256_loadu_ps(row + (size_t)i * out), acc);
+}
+```
+
+`experiments/bench_gemv.c` 对三种实现做微基准（p100mw 的 head `D→vocab`，46.1 MB）：
+
+| 实现 | 1 线程 | 4 线程 | 8 线程 | 对原实现 |
+|---|---|---|---|---|
+| 原 stride 布局 | 4.11 GB/s | 8.66 | 8.39 | 1.00× |
+| 原 stride + OpenMP | — | — | — | 2.11× |
+| **行主序 `(out,in)`** | 18.91 | 30.91 | 28.86 | **4.61×**（1 线程）／**7.53×**（4 线程） |
+
+行主序让每个输出行的权重连续，一次 load 命中相邻缓存行；并行沿输出通道切分，
+各行无依赖。**只加 OpenMP 不改布局只有 2.1×，改布局才是主项。**
+
+**改法与兼容性**。不动导出格式（仍是 `(in,out)`，已发布的 blob 无需重导）：
+`sn_load` 读入后在内存里就地翻转成行主序，元素数不变因此后续区段偏移不受影响。
+GEMV 改成按输出通道并行的连续读。
+
+**线程数取物理核，不是逻辑核**。解码是访存受限，超线程不增加带宽；
+实测 6 物理核 26.69 ms vs 12 逻辑核 36.05 ms（差 26%）。C 侧新增
+`sn_recommended_threads()`：Windows 走 `GetLogicalProcessorInformation` 统计
+`RelationProcessorCore`，Linux 解析 `/proc/cpuinfo` 的 `(physical id, core id)` 去重。
+
+**A/B 对照**（`experiments/_ab_runtime_opt.py`：优化前的库由 `git show` 出源码单独编译，
+同一 blob、同一 32 token 序列、5 轮交错 head-to-head）：
+
+| 口径 | 结果 |
+|---|---|
+| logits max\|diff\| | **2.766e-05** |
+| argmax 一致 | **32 / 32** |
+| 逐位相同 | False（并行求和顺序改变舍入，符合预期） |
+| 优化前 | 76.60 ms/token，6.10 GB/s |
+| 优化后 | **25.72 ms/token，18.18 GB/s** |
+| 加速 | **2.98×**，逐轮 **5/5** 占优 |
+
+对 torch 的数值一致性仍满足既有容差（`_verify_runtime_opt.py` 用
+`forward_step` 单线程口径：max\|diff\| 7.15e-06、argmax 32/32）。
+线程数扫描（`experiments/_bench_runtime_threads.py`，5 轮中位）：
+
+| 线程 | 1 | 2 | 3 | 4 | 6 | 8 | 12 |
+|---|---|---|---|---|---|---|---|
+| ms/token | 56.12 | 40.37 | 32.57 | 30.35 | **26.69** | 36.05 | 36.03 |
+
+**边界**：2.98× 是**本机（i7-8750H 双通道 DDR4-2667）**的单步解码倍数，
+只说明该实现的访存效率从 6.1 提到 18.2 GB/s。18.18 GB/s 仍低于
+`bench_bw.c` 的 25.31 GB/s 上限，差额来自每步还有 reduce/归一化等非流式访问。
+不得据此外推训练或 prefill（prefill 走同一 `sn_step` 循环，无批量并行）。
+原实现 75.75→76.60 的差异来自测量脚本不同（前者含 `_load` 首次调用），不作陈述。
+
 ### 24.8 命令行推理
 
 `sunnynet/cli.py`，`python -m sunnynet.cli --ckpt <path> --prompt "..."`。

@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <omp.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -31,18 +32,65 @@ static FILE* sn_fopen(const char* path, const char* mode) {
 
 #define SN_MAGIC 0x4E4E5355 /* "USNN" */
 
+void sn_set_threads(int n) { if (n > 0) omp_set_num_threads(n); }
+int sn_get_threads(void) { return omp_get_max_threads(); }
+
+/* 物理核数. 解码是访存受限, 超线程不增加带宽, 反而因争用变慢
+ * (p100mw 实测 6 核 26.7 ms vs 12 逻辑核 36.0 ms)。 */
+int sn_recommended_threads(void) {
+#ifdef _WIN32
+    DWORD len = 0;
+    GetLogicalProcessorInformation(NULL, &len);
+    if (len == 0) return 0;
+    SYSTEM_LOGICAL_PROCESSOR_INFORMATION* buf =
+        (SYSTEM_LOGICAL_PROCESSOR_INFORMATION*)malloc(len);
+    if (!buf) return 0;
+    int n = 0;
+    if (GetLogicalProcessorInformation(buf, &len)) {
+        const DWORD cnt = len / sizeof(*buf);
+        for (DWORD i = 0; i < cnt; ++i)
+            if (buf[i].Relationship == RelationProcessorCore) ++n;
+    }
+    free(buf);
+    return n;
+#else
+    FILE* f = fopen("/proc/cpuinfo", "r");
+    if (!f) return 0;
+    char line[256];
+    int phys = -1, core = -1, n = 0;
+    int seen[256][2];
+    while (fgets(line, sizeof line, f)) {
+        int v;
+        if (sscanf(line, "physical id : %d", &v) == 1) phys = v;
+        else if (sscanf(line, "core id : %d", &v) == 1) core = v;
+        else if (line[0] == '\n') {
+            if (core >= 0) {
+                int dup = 0;
+                for (int i = 0; i < n; ++i)
+                    if (seen[i][0] == phys && seen[i][1] == core) { dup = 1; break; }
+                if (!dup && n < 256) { seen[n][0] = phys; seen[n][1] = core; ++n; }
+            }
+            phys = core = -1;
+        }
+    }
+    fclose(f);
+    return n > 0 ? n : omp_get_num_procs();
+#endif
+}
+
+/* 权重在内存中为行主序 (out, in): 输出通道 j 的权重连续。 */
 typedef struct {
     int D, I, R, K;
     const float* ni_g;
     const float* ni_c;
     const float* nm_g;
     const float* nm_c;
-    const float* dw_t;   /* (K,D) */
-    const float* Vt;     /* V.weight^T (D,R)   */
-    const float* Ut;     /* U.weight^T (R,2D)  */
-    const float* Wz_t;   /* W_z^T (D,I)        */
-    const float* Wc_t;   /* W_c^T (I,D)        */
-    const float* Ws_t;   /* W_s_eff^T (D,D)    */
+    const float* dw_t;   /* (K,D) 行主序, 每 tap 一段连续 */
+    const float* Vt;     /* V.weight 行主序 (R,D) */
+    const float* Ut;     /* U.weight 行主序 (2D,R) */
+    const float* Wz_t;   /* W_z 行主序 (I,D) */
+    const float* Wc_t;   /* W_c 行主序 (D,I) */
+    const float* Ws_t;   /* W_s_eff 行主序 (D,D) */
     const float* delta;  /* (D) */
     float a_tanh, b_gain;
     float* s;
@@ -63,23 +111,49 @@ struct SnModel {
     int ready;
 };
 
-static void gemv(float* y, const float* x, const float* Wt, int in, int out) {
-    int j = 0;
-    for (; j + 8 <= out; j += 8) {
+/* y[out] = W_rowmajor (out,in) · x[in]. 输出通道之间无依赖, 按行切分并行。 */
+static void gemv(float* y, const float* x, const float* W, int in, int out) {
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < out; ++j) {
+        const float* row = W + (size_t)j * in;
         __m256 acc = _mm256_setzero_ps();
-        const float* row = Wt + j;
-        for (int i = 0; i < in; ++i) {
-            const __m256 b = _mm256_set1_ps(x[i]);
-            acc = _mm256_fmadd_ps(b, _mm256_loadu_ps(row + (size_t)i * out), acc);
+        int i = 0;
+        for (; i + 8 <= in; i += 8)
+            acc = _mm256_fmadd_ps(_mm256_loadu_ps(row + i),
+                                  _mm256_loadu_ps(x + i), acc);
+        float t[8];
+        _mm256_storeu_ps(t, acc);
+        float s = t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+        for (; i < in; ++i) s += row[i] * x[i];
+        y[j] = s;
+    }
+}
+
+/* 把导出器的 (in,out) 转置块翻成行主序 (out,in)。分块避免跨步抖动。 */
+static void transpose_into(float* dst, const float* src, int in, int out) {
+    const int BS = 32;
+    #pragma omp parallel for schedule(static)
+    for (int jb = 0; jb < out; jb += BS) {
+        const int jn = (jb + BS <= out) ? BS : out - jb;
+        for (int ib = 0; ib < in; ib += BS) {
+            const int inn = (ib + BS <= in) ? BS : in - ib;
+            for (int j = jb; j < jb + jn; ++j) {
+                float* d = dst + (size_t)j * in + ib;
+                const float* sr = src + (size_t)ib * out + j;
+                for (int i = 0; i < inn; ++i) d[i] = sr[(size_t)i * out];
+            }
         }
-        _mm256_storeu_ps(y + j, acc);
     }
-    for (; j < out; ++j) {
-        float acc = 0.0f;
-        const float* row = Wt + j;
-        for (int i = 0; i < in; ++i) acc += x[i] * row[(size_t)i * out];
-        y[j] = acc;
-    }
+}
+
+/* 原地转置: 元素数不变, 后续区段偏移不受影响。 */
+static void flip_inplace(float* region, int in, int out) {
+    const size_t n = (size_t)in * out;
+    float* tmp = (float*)malloc(sizeof(float) * n);
+    if (!tmp) return;              /* 退化: 保持导出布局, 结果仍正确但更慢 */
+    memcpy(tmp, region, sizeof(float) * n);
+    transpose_into(region, tmp, in, out);
+    free(tmp);
 }
 
 static inline float sgn(float x) { return 1.0f / (1.0f + expf(-x)); }
@@ -302,6 +376,14 @@ SnModel* sn_load(const char* path, int vocab, int dim, int inner, int rank,
     float* q = m->wbuf;
     for (int l = 0; l < layers; ++l) {
         SnLayer* L = &m->layers[l];
+        /* 导出块按导出时的逻辑形状 (in,out) 解释后翻转成 (out,in)。
+         * 顺序: Vt=(D,R) Ut=(R,2D) Wz_t=(D,I) Wc_t=(I,D) Ws_t=(D,D)。 */
+        flip_inplace((float*)L->Vt, dim, rank);
+        flip_inplace((float*)L->Ut, rank, 2 * dim);
+        flip_inplace((float*)L->Wz_t, dim, inner);
+        flip_inplace((float*)L->Wc_t, inner, dim);
+        flip_inplace((float*)L->Ws_t, dim, dim);
+
         q += 2 * dim + 2 * inner + (size_t)taps * dim + (size_t)dim * rank +
              (size_t)rank * 2 * dim + (size_t)dim * inner + (size_t)inner * dim +
              (size_t)dim * dim + dim;
@@ -313,6 +395,7 @@ SnModel* sn_load(const char* path, int vocab, int dim, int inner, int rank,
         L->hist = (float*)calloc((size_t)(taps > 1 ? taps - 1 : 1) * dim, sizeof(float));
         if (!L->s || !L->hist) { sn_free(m); return NULL; }
     }
+    flip_inplace((float*)m->head_t, dim, m->vocab);
 
     const size_t scn = (size_t)3 * dim + rank + (size_t)2 * dim + (size_t)2 * dim +
                        (size_t)2 * inner + dim;

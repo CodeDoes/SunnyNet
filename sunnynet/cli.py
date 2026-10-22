@@ -332,7 +332,8 @@ def main(argv=None):
 
     runtime = None
     if args.backend == "c":
-        from .runtime.model import SnModel
+        from .runtime.model import SnModel, set_threads, recommended_threads
+        set_threads(args.threads if args.threads > 0 else recommended_threads())
         blob = Path(args.blob) if args.blob else Path(args.ckpt).with_suffix(".runtime.bin")
         if not blob.exists():
             raise SystemExit(f"缺少权重 blob: {blob}\n"
