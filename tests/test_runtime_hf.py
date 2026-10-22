@@ -4,12 +4,16 @@
 """
 
 import os
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-MAMBA = os.environ.get("SUNNY_MAMBA2", r"F:\sunnyclaw-data\models\mamba2-130m")
-DELTA = os.environ.get("SUNNY_DELTANET", r"F:\sunnyclaw-data\models\deltanet-pure")
+ROOT = Path(__file__).resolve().parents[1]
+
+# 权重体积大不入库; 用环境变量指向本地目录, 缺失则跳过相关用例。
+MAMBA = os.environ.get("SUNNY_MAMBA2", str(ROOT / "models" / "mamba2-130m"))
+DELTA = os.environ.get("SUNNY_DELTANET", str(ROOT / "models" / "deltanet-pure"))
 
 skip_mamba = pytest.mark.skipif(
     not os.path.exists(os.path.join(MAMBA, "pytorch_model.bin")),

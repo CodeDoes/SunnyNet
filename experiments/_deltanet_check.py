@@ -9,14 +9,17 @@
 4. 英文贪心生成连贯性。
 """
 
+import os
 import sys
+from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, r"C:\Users\陈旭\Desktop\CPU神经网络")
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 from sunnynet.runtime.deltanet import DeltaNet  # noqa: E402
 
-MDIR = r"F:\sunnyclaw-data\models\deltanet-pure"
+MDIR = os.environ.get("SUNNY_DELTANET", str(ROOT / "models" / "deltanet-pure"))
 
 
 def check_delta_algebra():

@@ -4,14 +4,17 @@
 """
 
 import json
+import os
 import sys
+from pathlib import Path
 
 import numpy as np
 import torch
 
-sys.path.insert(0, r"C:\Users\陈旭\Desktop\CPU神经网络")
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
 
-MDIR = r"F:\sunnyclaw-data\models\mamba2-130m"
+MDIR = os.environ.get("SUNNY_MAMBA2", str(ROOT / "models" / "mamba2-130m"))
 
 
 def make_cfg(n_groups, state_size):

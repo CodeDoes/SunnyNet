@@ -113,6 +113,9 @@ Foreign weights: `sunnynet/runtime/gguf.py` reads GGUF and `rwkv7.py` runs RWKV-
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cpu
 pip install numpy matplotlib pytest
+
+# 安装本包 (发布名为 sunnynet-cx, 导入名仍是 sunnynet)
+pip install sunnynet-cx          # 或 pip install -e . 从源码装
 ```
 
 ### 1. 下载语料并构建 token 流

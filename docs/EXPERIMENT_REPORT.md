@@ -2456,8 +2456,9 @@ C 内核 8 线程对 1 线程再快 1.39×（5/5）。**边界**：单线程单�
 ### 24.12 外部权重接入：Mamba-2 与 DeltaNet
 
 `runtime/mamba2.py`、`runtime/deltanet.py`。同一 `step(token, state)` 接口加载另外两种
-线性架构的官方权重，逐 token 单步递推，前向不经 PyTorch。两套权重本机在 F 盘
-（`F:\sunnyclaw-data\models\`），不入库。
+线性架构的官方权重，逐 token 单步递推，前向不经 PyTorch。权重体积大，不入库；
+放到任意目录后用 `--hf-dir` 指向，或给测试设 `SUNNY_MAMBA2` / `SUNNY_DELTANET`
+环境变量（不设则跳过相关用例）。
 
 **（1）Mamba-2**（`state-spaces/mamba2-130m`，d_model 768 / 24 层 / 24 head × 64）
 

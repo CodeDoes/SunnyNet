@@ -4,6 +4,7 @@
 """
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -12,8 +13,8 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 PY = sys.executable
 
-MAMBA = r"F:\sunnyclaw-data\models\mamba2-130m"
-DELTA = r"F:\sunnyclaw-data\models\deltanet-pure"
+MAMBA = os.environ.get("SUNNY_MAMBA2", str(ROOT / "models" / "mamba2-130m"))
+DELTA = os.environ.get("SUNNY_DELTANET", str(ROOT / "models" / "deltanet-pure"))
 
 WORKER = r'''
 import sys, time, json

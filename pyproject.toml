@@ -3,7 +3,7 @@ requires = ["setuptools>=61", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sunnynet"
+name = "sunnynet-cx"
 dynamic = ["version"]
 description = "Original CPU-first sequence architecture with a standalone linear-recurrence inference runtime"
 readme = "README.md"

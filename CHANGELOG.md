@@ -29,6 +29,12 @@
   `--hf-dir`（Mamba-2 / DeltaNet）、`--backend c`、`--gguf-backend c`、`--quant {fp32,int4}`。
 - `sunnynet.runtime.load_model(arch, path)`：按架构名加载外部权重。
 
+### 分发
+- 发布名 `sunnynet-cx`，导入名 `sunnynet`，命令 `sunnynet`。
+  PyPI 上 `sunnynet` 已属他人项目（网络抓包中间件），同名不可注册。
+- 发布走 GitHub Actions 的 Trusted Publisher（OIDC，无需长期令牌）；
+  tag `v*` 触发 build → twine check → publish。
+
 ### 已知边界
 - 内核需 AVX2/FMA 与 C 编译器（首次调用自动编译）。
 - INT4 质量：英文保持，中文与代码有退化，未配校准。
