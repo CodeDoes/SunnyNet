@@ -4,7 +4,11 @@
 #include <stddef.h>
 #include <omp.h>
 
+#ifdef _WIN32
 #define EXPORT __declspec(dllexport)
+#else
+#define EXPORT __attribute__((visibility("default")))
+#endif
 
 static const int IDX_L1[8] = {1, 2, 3, 4, 5, 6, 7, 0};
 static const int IDX_L2[8] = {2, 3, 4, 5, 6, 7, 0, 1};

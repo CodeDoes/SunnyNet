@@ -4,12 +4,12 @@ from __future__ import annotations
 import ctypes
 from pathlib import Path
 
-from . import BUILD, HERE, _find_gcc
+from . import BUILD, HERE, _find_gcc, compile_flags, shlib_name
 
 __all__ = ["quant_available", "load_quant", "I4_BLOCK"]
 
 I4_BLOCK = 64
-DLL = BUILD / "sunnynet_quant.dll"
+DLL = BUILD / shlib_name("sunnynet_quant")
 
 
 def quant_available() -> bool:
@@ -19,9 +19,7 @@ def quant_available() -> bool:
 def _compile(gcc: str) -> None:
     import subprocess
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
-           "-funroll-loops", "-fopenmp", "-static", "-shared", "-std=c11",
-           str(HERE / "quant.c"), "-o", str(DLL)]
+    cmd = [gcc] + compile_flags() + [str(HERE / "quant.c"), "-o", str(DLL)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"quant 编译失败: {(r.stderr or r.stdout)[-800:]}")

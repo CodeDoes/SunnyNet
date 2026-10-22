@@ -20,7 +20,24 @@ CORE_SRC = HERE / "core_avx2.c"
 STEP_SRC = HERE / "step_avx2.c"
 SOURCES = [SRC, CORE_SRC, STEP_SRC]
 BUILD = HERE / "_build"
-DLL = BUILD / "sunnynet_kernels.dll"
+
+_COMMON_FLAGS = ["-O3", "-mavx2", "-mfma", "-march=x86-64-v3", "-funroll-loops"]
+
+
+def _compile_flags() -> list[str]:
+    """Windows (mingw) 要 `-static -shared`; Linux 的 GNU ld 不接受该组合,
+    且必须 `-fPIC`, 否则报 "attempted static link of dynamic object" 与
+    "recompile with -fPIC"。"""
+    f = list(_COMMON_FLAGS)
+    if sys.platform == "win32":
+        f += ["-fopenmp", "-static", "-shared"]
+    else:
+        f += ["-fopenmp", "-fPIC", "-shared"]
+    return f
+
+
+DLL = BUILD / ("sunnynet_kernels.dll" if sys.platform == "win32"
+               else "sunnynet_kernels.so")
 
 TOOLCHAIN_HINT = (
     "未找到 C 编译器。设置环境变量 SUNNY_W64 指向 w64devkit 根目录, 例如:\n"
@@ -91,8 +108,7 @@ def kernel_available() -> bool:
 
 def _compile(gcc: str) -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
-           "-funroll-loops", "-fopenmp", "-static", "-shared"]
+    cmd = [gcc] + _compile_flags()
     cmd += [str(s) for s in SOURCES]
     cmd += ["-o", str(DLL)]
     r = subprocess.run(cmd, capture_output=True, text=True)

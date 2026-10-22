@@ -2,7 +2,11 @@
 #include <immintrin.h>
 #include <stddef.h>
 
+#ifdef _WIN32
 #define EXPORT __declspec(dllexport)
+#else
+#define EXPORT __attribute__((visibility("default")))
+#endif
 
 /* p, nu: (B,T,N) 连续; s0: (B,N); out: (B,T,N); send: (B,N) 末态 */
 EXPORT void scan_f32(const float* p, const float* nu, const float* s0,

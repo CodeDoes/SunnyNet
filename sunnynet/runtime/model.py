@@ -4,11 +4,11 @@ from __future__ import annotations
 import ctypes
 from pathlib import Path
 
-from . import BUILD, HERE, _find_gcc
+from . import BUILD, HERE, _find_gcc, compile_flags, shlib_name
 
 __all__ = ["SnModel", "model_available"]
 
-DLL = BUILD / "sunnynet_model.dll"
+DLL = BUILD / shlib_name("sunnynet_model")
 
 
 def model_available() -> bool:
@@ -18,9 +18,7 @@ def model_available() -> bool:
 def _compile(gcc: str) -> None:
     import subprocess
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
-           "-funroll-loops", "-fopenmp", "-static", "-shared", "-std=c11",
-           str(HERE / "sunnynet.c"), "-o", str(DLL)]
+    cmd = [gcc] + compile_flags() + [str(HERE / "sunnynet.c"), "-o", str(DLL)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         raise RuntimeError(f"model runtime 编译失败: {(r.stderr or r.stdout)[-800:]}")

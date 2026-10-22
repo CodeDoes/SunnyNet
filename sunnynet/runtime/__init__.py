@@ -19,7 +19,7 @@ from pathlib import Path
 __all__ = [
     "runtime_available", "load_runtime", "FMA", "GATED",
     "scan", "scan_bwd", "step", "quant_i8", "dequant_i8", "TOOLCHAIN_HINT",
-    "MODELS", "load_model",
+    "compile_flags", "shlib_name", "MODELS", "load_model",
 ]
 
 # 外部权重架构注册表: 名字 -> (模块, 类)
@@ -44,7 +44,6 @@ GATED = 1
 HERE = Path(__file__).resolve().parent
 SRC = HERE / "recur.c"
 BUILD = HERE / "_build"
-DLL = BUILD / "sunnynet_runtime.dll"
 
 TOOLCHAIN_HINT = (
     "未找到 C 编译器。设置环境变量 SUNNY_W64 指向 w64devkit 根目录, 例如:\n"
@@ -53,6 +52,35 @@ TOOLCHAIN_HINT = (
 )
 
 _lib = None
+
+_COMMON_FLAGS = ["-O3", "-mavx2", "-mfma", "-march=x86-64-v3", "-funroll-loops"]
+
+
+def compile_flags(std: bool = True) -> list[str]:
+    """生成共享库的编译与链接参数.
+
+    Windows (mingw) 需要 `-static`/`-shared` 才能产出独立 dll; Linux 的 GNU ld
+    不接受 `-static -shared` 组合, 且必须显式 `-fPIC`, 否则报
+    "attempted static link of dynamic object" 与 "recompile with -fPIC"。
+    """
+    import sys
+    f = list(_COMMON_FLAGS)
+    if sys.platform == "win32":
+        f += ["-fopenmp", "-static", "-shared"]
+    else:
+        f += ["-fopenmp", "-fPIC", "-shared"]
+    if std:
+        f += ["-std=c11"]
+    return f
+
+
+def shlib_name(stem: str) -> str:
+    """共享库文件名; ctypes 按平台后缀查找更稳。"""
+    import sys
+    return f"{stem}.dll" if sys.platform == "win32" else f"{stem}.so"
+
+
+DLL = BUILD / shlib_name("sunnynet_runtime")
 
 
 def _find_gcc() -> str | None:
@@ -72,8 +100,7 @@ def runtime_available() -> bool:
 
 def _compile(gcc: str) -> None:
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc, "-O3", "-mavx2", "-mfma", "-march=x86-64-v3",
-           "-funroll-loops", "-fopenmp", "-static", "-shared", "-std=c11"]
+    cmd = [gcc] + compile_flags()
     cmd += [str(HERE / "recur.c"), "-o", str(DLL)]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
