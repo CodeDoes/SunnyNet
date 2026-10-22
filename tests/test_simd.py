@@ -37,6 +37,8 @@ def _gcc():
 NEED_GCC = pytest.mark.skipif(_gcc() is None, reason="无 C 编译器")
 HAS_AVX512 = simd.avx512_supported()
 IS_AARCH64 = simd.arch_name() == "aarch64"
+# AVX-512 源码只在 x86-64 上能编译 (AArch64 无 mavx512* 特性)
+IS_X86 = simd.arch_name() == "x86_64"
 
 
 # ------------------------------------------------------------- 架构探测
@@ -53,6 +55,7 @@ def test_avx512_probe_matches_known_host():
 
 
 # ------------------------------------------------------- AVX-512 编译
+@pytest.mark.skipif(not IS_X86, reason="AVX-512 源码只能在 x86-64 上编译")
 @NEED_GCC
 def test_avx512_compiles_with_zmm(tmp_path):
     """AVX-512 源码必须能编译, 且产出含 zmm 寄存器的目标文件."""

@@ -4,7 +4,8 @@
  * 每寄存器 4 个 float, 用 vfmaq_f32 做融合乘加。
  *
  * 编译 (树莓派 / Apple Silicon / 任何 AArch64 Linux):
- *   gcc -O3 -mfpu=neon -fopenmp -shared -fPIC scan_neon.c -o scan_neon.so
+ *   gcc -O3 -fopenmp -shared -fPIC scan_neon.c -o scan_neon.so
+ * 注意不要加 -mfpu=neon: 那是 ARM32 专有选项, AArch64 的 gcc 会直接拒绝。
  * 交叉编译 (x86 主机):
  *   aarch64-linux-gnu-gcc -O3 -fopenmp -shared -fPIC scan_neon.c -o scan_neon.so
  * 或 zig cc -target aarch64-linux-gnu ...

@@ -25,7 +25,8 @@ BUILD = HERE / "_build"
 
 _AVX512_FLAGS = ["-O3", "-mavx512f", "-mavx512bw", "-mavx512vl", "-mfma",
                  "-funroll-loops", "-fopenmp", "-std=c11"]
-_NEON_FLAGS = ["-O3", "-mfpu=neon", "-fopenmp", "-std=c11"]
+# AArch64 的 NEON 是基线特性; -mfpu 是 ARM32 专有选项, AArch64 的 gcc 会直接拒绝。
+_NEON_FLAGS = ["-O3", "-fopenmp", "-std=c11"]
 
 
 def arch_name() -> str:
