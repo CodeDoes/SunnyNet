@@ -1,5 +1,9 @@
 # SunnyNet
 
+[![tests](https://github.com/SunnyClaw-cx/SunnyNet/actions/workflows/tests.yml/badge.svg)](https://github.com/SunnyClaw-cx/SunnyNet/actions/workflows/tests.yml)
+[![PyPI](https://img.shields.io/pypi/v/sunnynet-cx)](https://pypi.org/project/sunnynet-cx/)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
+
 **English** · [中文](#中文简介)
 
 An original general-purpose sequence architecture, not derived from Transformer, RNN, Mamba, CNN, or any existing design.
