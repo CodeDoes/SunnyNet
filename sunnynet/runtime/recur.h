@@ -32,6 +32,25 @@ void sn_recur_bwd(const float* a, const float* b, const float* s0,
 /* 单步解码. a, b: (B,N); s: (B,N) 原地更新. */
 void sn_recur_step(const float* a, const float* b, float* s, int B, int N, int gated);
 
+/* 矩阵值 rank-1 递推单步 (逐 head 同维). 元素级形式表达不了 S += v x k 这类
+ * 外积累加, 故单列一层. 统一形式:
+ *     p[i]      = sum_j S[i][j] * u[j]          (读更新前的 S)
+ *     S[i][j]    = S[i][j] * w[j] + v[i]*k[j] - p[i]*b[j]
+ *     y[i]      = sum_j S[i][j] * r[j]
+ *
+ * 参 NULL 即跳过该项: w=NULL 无衰减, u=NULL 跳过投影, b=NULL 无校正,
+ * r=NULL 不计算 y。各架构映射:
+ *     RWKV-7   w=衰减(列) u=kk  v=v k=k b=kk*a r=r
+ *     DeltaNet w=NULL u=k v=beta*v k=k b=beta*k r=q (状态按 (V,K) 存)
+ *     GLA/Mamba-2 衰减可分解, 走元素级 sn_recur_step 即可
+ *
+ * S: (NH,R,C) 行主序原地更新; w/u/k/b/r: (NH,C); v/y: (NH,R);
+ * pbuf: (NH,R) 暂存, 由调用方提供以免内核内分配。
+ */
+void sn_mat_scan(float* S, const float* w, const float* u, const float* v,
+                 const float* k, const float* b, const float* r, float* y,
+                 float* pbuf, int NH, int R, int C);
+
 /* 分块对称 INT8 量化. block<=0 取整层一块.
  * q: (B,N) int8, scale: (B,ceil(N/block)) */
 void sn_quant_i8(const float* x, signed char* q, float* scale,

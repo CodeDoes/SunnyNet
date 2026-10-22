@@ -2,6 +2,16 @@
 
 ## 未发布
 
+### 矩阵值 rank-1 递推内核
+- 新增 `sn_mat_scan`（`runtime/recur.c`，声明见 `recur.h`）：统一形式
+  `p=S·u; S=S⊙w+v⊗k−p⊗b; y=S·r`，参数传 `NULL` 即跳过，覆盖 RWKV-7 与 DeltaNet
+  的矩阵状态层级。逐 head 串行、沿 `C` 维 8 宽向量化 + 标量尾。
+- Python 侧 `sunnynet.runtime.mat_step(S, w=, u=, v=, k=, b=, r=)`，`S` 为 `(NH,R,C)`
+  连续 fp32，原地更新，返回 `y`。
+- 数值契约 `tests/test_mat_scan.py` 11 用例全通过，相对误差 1e-7 量级。
+- 算子级 8×128×128 为 numpy 的 **4.25×**；但实测只占 DeltaNet 单步 **2.2%**，
+  不能据此声称端到端加速——剩余时间在逐层 GEMV。
+
 ### fp16 权重解码路径
 - 新增 `sn_load_h()`：载入时把 5 个 GEMV 矩阵与 LM head 截断为 fp16，小参数仍 fp32；
   单步实读 467.6 → 约 222.3 MB。内核 `gemv_h` 一次读 16 个 half（32 B）后转 fp32 做
@@ -97,5 +107,6 @@
 - 内核需 AVX2/FMA 与 C 编译器（首次调用自动编译）。
 - INT4 质量：英文保持，中文与代码有退化，未配校准。
 - Mamba-2 / DeltaNet / GLA 目前只有 numpy 参考路径（单线程 45.7 / 91.5 / 85.1 ms/token），
-  尚未 C 化；矩阵值 rank-1 递推（DeltaNet、RWKV-7）现有内核表达不了。
+  尚未 C 化。矩阵值 rank-1 递推已进 C 内核（`sn_mat_scan`），但实测只占 DeltaNet 单步
+  2.2%，整模型提速需把前向搬进 C。
 - 0.5B 预设在本机 6GB 显卡为边界态，未发布质量数字。

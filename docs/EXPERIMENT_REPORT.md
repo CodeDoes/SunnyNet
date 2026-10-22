@@ -2684,9 +2684,44 @@ o_t = S_tᵀ q_t
 **这是参考路径的绝对耗时，不与任何基线比倍数。** 两者单步复杂度都是
 `O(heads × head_dim × state_size)`，与上下文长度无关。
 
-**（4）矩阵值递推层级仍未进 C**：RWKV-7 与 DeltaNet 的状态更新都含 `S ← S + k ⊗ (·)`
-这类外积累加，`SN_FMA` / `SN_GATED` 的逐通道形式表达不了；Mamba-2 因衰减外积可分解
-而不需要。这是本 Runtime 目前唯一尚未 C 化的递推层级。
+**（4）矩阵值递推层级已在 C 内核中实现**（`sn_mat_scan`，`runtime/recur.c`）：RWKV-7 与
+DeltaNet 的状态更新都含 `S ← S + k ⊗ (·)` 这类外积累加，`SN_FMA` / `SN_GATED` 的
+逐通道形式表达不了；Mamba-2 因衰减外积可分解而不需要。内核统一形式为
+
+```
+p[i]   = Σ_j S[i][j] · u[j]                    读更新前的 S
+S[i][j] = S[i][j] · w[j] + v[i]·k[j] − p[i]·b[j]
+y[i]   = Σ_j S[i][j] · r[j]
+```
+
+任一参数传 `NULL` 即跳过该项，覆盖四个架构：RWKV-7（`w`=衰减列、`u`=kk、`v`=v、`k`=k、
+`b`=kk⊙a、`r`=r）、DeltaNet（`w=NULL`、`u=k`、`v=βv`、`k=k`、`b=βk`、`r=q`）。
+逐 head 串行（head 间无依赖），沿 `C` 维 8 宽向量化 + 标量尾。
+
+数值契约见 `tests/test_mat_scan.py`（11 用例：全项 / 无衰减 / 仅外积 / 纯衰减 / 无读出 /
+`C ∈ {7,20,24,33}` 尾部路径 / 连续多步 / 拒绝非连续），相对误差 1e-7 量级（fp32 累加）。
+
+**（5）速度与占比——算子快不等于端到端快**（`experiments/_mat_scan_bench.py`，独占运行）
+
+| 形状 (H,R,C) | 内核 ms | numpy ms | 倍数 | 内核 IQR% |
+|---|---|---|---|---|
+| 8, 128, 128 | 0.0758 | 0.3221 | **4.25×** | 3.0 |
+| 8, 64, 64 | 0.0500 | 0.1170 | 2.34× | 4.6 |
+| 16, 32, 256 | 0.0988 | 0.3032 | 3.07× | 6.3 |
+
+**这只是算子级倍数。** 实测其在 DeltaNet 单步中的占比：
+
+| 量 | 值 |
+|---|---|
+| DeltaNet 单步（L=24, H=8, 128×128） | 75.405 ms |
+| 其中 24 层 rank-1 更新合计 | 1.639 ms |
+| **占比** | **2.2%** |
+
+⇒ **该内核能把 DeltaNet 单步压到 ~73.8 ms（−2.2%），不构成有效加速。** 剩余时间在逐层
+GEMV（`step()` 自身 tottime 占 81.5%），要真正提速必须把整模型前向搬进 C（任务 #71），
+而不是把某个算子局部 C 化。此结论与 §24.6 的教训一致：算子级优势会被端到端摊薄。
+
+**（6）开发中定位的坑**
 
 **（5）开发中定位的坑**
 - Mamba-2 的 `config.json` 缺 `state_size` / `n_groups`；`conv_dim` 只定出二者**乘积**
@@ -2935,6 +2970,9 @@ python -X utf8 experiments/_rwkv7_int4_e2e.py 5              # §24.11 INT4 端�
 python -X utf8 experiments/_rwkv7_int4_quality.py            # §24.11 INT4 质量对照
 python -X utf8 -m pytest tests/test_rwkv7_c.py -v
 python -X utf8 -m pytest tests/test_quant_i4.py -v
+python -X utf8 experiments/_mat_scan_bench.py                # §24.12 矩阵值内核算子级与占比
+python -X utf8 experiments/_deltanet_check.py                # §24.12 DeltaNet 正确性
+python -X utf8 -m pytest tests/test_mat_scan.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。

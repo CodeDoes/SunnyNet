@@ -9,6 +9,15 @@
 void sn_set_threads(int n) { omp_set_num_threads(n); }
 int sn_threads(void) { return omp_get_max_threads(); }
 
+static inline float hsum256(__m256 v) {
+    __m128 lo = _mm256_castps256_ps128(v);
+    __m128 hi = _mm256_extractf128_ps(v, 1);
+    lo = _mm_add_ps(lo, hi);
+    lo = _mm_hadd_ps(lo, lo);
+    lo = _mm_hadd_ps(lo, lo);
+    return _mm_cvtss_f32(lo);
+}
+
 /* a, b: (B,T,N) 连续. 沿 N 向量化, T 串行 (依赖链). */
 void sn_recur_scan(const float* a, const float* b, const float* s0,
                    float* out, float* send, int B, int T, int N, int gated) {
@@ -126,6 +135,76 @@ void sn_recur_step(const float* a, const float* b, float* s, int B, int N, int g
             const float av = ab[d];
             const float bv = gated ? (1.0f - av) * bbb[d] : bbb[d];
             sb[d] = av * sb[d] + bv;
+        }
+    }
+}
+
+/* 逐 head 矩阵值 rank-1 递推. 每 head 的 S 是 (R,C) 行主序三角区.
+ * 内层沿 C 向量化; R 维串行 (行间无依赖, 但投影 p 需要先读整行). */
+void sn_mat_scan(float* S, const float* w, const float* u, const float* v,
+                 const float* k, const float* b, const float* r, float* y,
+                 float* pbuf, int NH, int R, int C) {
+    for (int h = 0; h < NH; ++h) {
+        float* Sh = S + (size_t)h * R * C;
+        const float* wh = w ? w + (size_t)h * C : NULL;
+        const float* uh = u ? u + (size_t)h * C : NULL;
+        const float* kh = k ? k + (size_t)h * C : NULL;
+        const float* bh = b ? b + (size_t)h * C : NULL;
+        const float* vh = v ? v + (size_t)h * R : NULL;
+        const float* rh = r ? r + (size_t)h * C : NULL;
+        float* yh = y ? y + (size_t)h * R : NULL;
+        float* ph = pbuf ? pbuf + (size_t)h * R : NULL;
+
+        /* 投影 p = S u (用更新前的 S) */
+        if (ph && uh) {
+            for (int i = 0; i < R; ++i) {
+                const float* row = Sh + (size_t)i * C;
+                __m256 acc = _mm256_setzero_ps();
+                int j = 0;
+                for (; j + 8 <= C; j += 8)
+                    acc = _mm256_fmadd_ps(_mm256_loadu_ps(row + j),
+                                          _mm256_loadu_ps(uh + j), acc);
+                float s = hsum256(acc);
+                for (; j < C; ++j) s += row[j] * uh[j];
+                ph[i] = s;
+            }
+        }
+
+        for (int i = 0; i < R; ++i) {
+            float* row = Sh + (size_t)i * C;
+            const __m256 vi = _mm256_set1_ps(vh ? vh[i] : 0.0f);
+            const __m256 pi = _mm256_set1_ps(ph ? ph[i] : 0.0f);
+            __m256 yacc = _mm256_setzero_ps();
+            int j = 0;
+            for (; j + 8 <= C; j += 8) {
+                __m256 ns = _mm256_loadu_ps(row + j);
+                if (wh) ns = _mm256_mul_ps(ns, _mm256_loadu_ps(wh + j));
+                if (kh) {
+                    __m256 add = _mm256_mul_ps(vi, _mm256_loadu_ps(kh + j));
+                    if (bh) add = _mm256_sub_ps(
+                        add, _mm256_mul_ps(pi, _mm256_loadu_ps(bh + j)));
+                    ns = _mm256_add_ps(ns, add);
+                }
+                _mm256_storeu_ps(row + j, ns);
+                if (rh) yacc = _mm256_fmadd_ps(ns, _mm256_loadu_ps(rh + j), yacc);
+            }
+            if (j < C) {
+                float ys = rh ? hsum256(yacc) : 0.0f;
+                for (; j < C; ++j) {
+                    float s = row[j];
+                    if (wh) s *= wh[j];
+                    if (kh) {
+                        float add = (vh ? vh[i] : 0.0f) * kh[j];
+                        if (bh) add -= (ph ? ph[i] : 0.0f) * bh[j];
+                        s += add;
+                    }
+                    row[j] = s;
+                    if (rh) ys += s * rh[j];
+                }
+                if (yh) yh[i] = ys;
+            } else if (yh) {
+                yh[i] = hsum256(yacc);
+            }
         }
     }
 }

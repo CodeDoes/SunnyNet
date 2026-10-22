@@ -9,7 +9,7 @@
     mamba2    逐 head 矩阵但衰减外积可分解, 退化为 SN_FMA
     deltanet  delta rule, 真 rank-1 校正, 需矩阵值递推
     gla       只按 key 维衰减, 衰减可分解, 退化为元素级递推
-矩阵值递推 (rank-1) 不能由 SN_FMA 表达, 目前只有 numpy 参考路径。
+矩阵值递推 (rank-1) 不能由 SN_FMA 表达, 走 sn_mat_scan。
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from pathlib import Path
 
 __all__ = [
     "runtime_available", "load_runtime", "FMA", "GATED",
-    "scan", "scan_bwd", "step", "quant_i8", "dequant_i8", "TOOLCHAIN_HINT",
-    "compile_flags", "shlib_name", "MODELS", "load_model",
+    "scan", "scan_bwd", "step", "mat_step", "quant_i8", "dequant_i8",
+    "TOOLCHAIN_HINT", "compile_flags", "shlib_name", "MODELS", "load_model",
 ]
 
 # 外部权重架构注册表: 名字 -> (模块, 类)
@@ -129,6 +129,7 @@ def _bind(lib):
     lib.sn_recur_step.argtypes = [V, V, V, I, I, I]
     lib.sn_quant_i8.argtypes = [V, V, V, I, I, I]
     lib.sn_dequant_i8.argtypes = [V, V, V, I, I, I]
+    lib.sn_mat_scan.argtypes = [V, V, V, V, V, V, V, V, V, I, I, I]
     return lib
 
 
@@ -187,6 +188,30 @@ def step(a, b, s, gated=False):
     B, N = a.shape
     lib.sn_recur_step(_ptr(a), _ptr(b), _ptr(s), B, N, GATED if gated else FMA)
     return s
+
+
+def mat_step(S, w=None, u=None, v=None, k=None, b=None, r=None):
+    """矩阵值 rank-1 递推单步 (RWKV-7 / DeltaNet 的矩阵状态层级).
+
+    S: (NH,R,C) 原地更新; w/u/k/b/r: (NH,C); v: (NH,R)。任一项传 None 即跳过,
+    语义见 recur.h 的 sn_mat_scan。返回 y (NH,R)(r 为 None 时返回 None)。
+    """
+    import torch
+    lib = load_runtime()
+    NH, R, C = S.shape
+    y = torch.empty((NH, R), dtype=torch.float32) if r is not None else None
+    pb = torch.empty((NH, R), dtype=torch.float32)
+    if S.dtype != torch.float32 or not S.is_contiguous():
+        raise ValueError("S 必须是连续 fp32")
+    def _p(t):
+        if t is None:
+            return 0
+        if t.dtype != torch.float32 or not t.is_contiguous():
+            raise ValueError("参数必须是连续 fp32")
+        return t.data_ptr()
+    lib.sn_mat_scan(_ptr(S), _p(w), _p(u), _p(v), _p(k), _p(b), _p(r),
+                    _ptr(y) if y is not None else 0, _ptr(pb), NH, R, C)
+    return y
 
 
 def quant_i8(x, block: int = 0):
