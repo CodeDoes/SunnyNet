@@ -57,6 +57,23 @@ def _ws_eff(blk) -> torch.Tensor:
     return t0 * torch.roll(W, -1, dims=1) + t1 * W + t2 * torch.roll(W, 1, dims=1)
 
 
+def _canonicalize_safetensors(path: str | Path) -> None:
+    """把 safetensors 头部重写成键序确定的 JSON.
+
+    safetensors 0.8.0 序列化多键 metadata 时顺序不稳: 同一个 dict 连续导出会
+    得到不同字节 (实测五次三种哈希), 数据段却完全一致。发布的 sha256 因此不可
+    复现。这里按 sort_keys 重写头部 (长度随之更新), 数据段原样保留。
+    """
+    p = Path(path)
+    raw = p.read_bytes()
+    n = struct.unpack("<Q", raw[:8])[0]
+    hdr = json.loads(raw[8:8 + n].decode("utf-8"))
+    data = raw[8 + n:]
+    new = json.dumps(hdr, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False).encode("utf-8")
+    p.write_bytes(struct.pack("<Q", len(new)) + new + data)
+
+
 def export_safetensors(ckpt: str | Path, out: str | Path) -> dict:
     """导出 HF 风格 safetensors (权重 + config 写进 metadata).
 
@@ -84,6 +101,7 @@ def export_safetensors(ckpt: str | Path, out: str | Path) -> dict:
     outp = Path(out)
     outp.parent.mkdir(parents=True, exist_ok=True)
     save_file(sd, str(outp), metadata=meta)
+    _canonicalize_safetensors(outp)
     return {"file": str(outp), "bytes": outp.stat().st_size,
             "tensors": len(sd), "params": m.num_params(),
             "params_non_embed": m.num_params(non_embedding=True),

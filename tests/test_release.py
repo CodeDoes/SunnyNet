@@ -57,6 +57,20 @@ def test_export_safetensors_all_tensors_finite(ckpt, tmp_path):
             assert torch.isfinite(f.get_tensor(k)).all(), k
 
 
+def test_export_safetensors_is_deterministic(ckpt, tmp_path):
+    """同一 checkpoint 多次导出必须逐字节相同。
+
+    safetensors 0.8.0 序列化多键 metadata 时顺序不稳, 同一 dict 连续导出会得到
+    不同字节; 数据段一致, 发布 sha256 却不可复现。导出后规范化头部修复此点。
+    """
+    pytest.importorskip("safetensors")
+    a = tmp_path / "d1.safetensors"
+    b = tmp_path / "d2.safetensors"
+    release.export_safetensors(ckpt, a)
+    release.export_safetensors(ckpt, b)
+    assert release.sha256_of(a) == release.sha256_of(b)
+
+
 def test_export_runtime_blob_header(ckpt, tmp_path):
     info = release.export_runtime_blob(ckpt, tmp_path / "m.runtime.bin")
     raw = (tmp_path / "m.runtime.bin").read_bytes()
