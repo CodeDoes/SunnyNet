@@ -50,6 +50,9 @@ docs/DISCUSSIONS_*.md
 sunnynet/kernels/_build/
 sunnynet/runtime/_build/
 
+# 预编译库 (wheel 构建期生成, 不入库)
+sunnynet/_prebuilt/
+
 # 外部模型权重 (体积大, 由 download 脚本按需获取)
 experiments/gguf/
 

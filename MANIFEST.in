@@ -11,3 +11,5 @@ prune .ref
 # 本机编译缓存, 不入包
 prune sunnynet/runtime/_build
 prune sunnynet/kernels/_build
+# 预编译库由 wheel 构建期生成, sdist 只带源码
+prune sunnynet/_prebuilt

@@ -39,6 +39,8 @@ def _compile_flags() -> list[str]:
 DLL = BUILD / ("sunnynet_kernels.dll" if sys.platform == "win32"
                else "sunnynet_kernels.so")
 
+_LIB = None
+
 TOOLCHAIN_HINT = (
     "未找到 C 编译器。设置环境变量 SUNNY_W64 指向 w64devkit 根目录, 例如:\n"
     "  set SUNNY_W64=<w64devkit 解压目录>"
@@ -103,6 +105,9 @@ def _cpuid_avx2() -> bool:
 
 
 def kernel_available() -> bool:
+    from .. import _native
+    if _native.locate(DLL.name) is not None:
+        return _cpu_has_avx2()
     return _find_gcc() is not None and _cpu_has_avx2()
 
 
@@ -124,14 +129,7 @@ def _needs_rebuild() -> bool:
     return any(s.stat().st_mtime > dll_t for s in SOURCES)
 
 
-def load_kernel(force_rebuild: bool = False):
-    """按 autograd.Function 里用到的签名批量设好 argtypes."""
-    gcc = _find_gcc()
-    if gcc is None:
-        raise RuntimeError(TOOLCHAIN_HINT)
-    if force_rebuild or _needs_rebuild():
-        _compile(gcc)
-    lib = ctypes.CDLL(str(DLL))
+def _bind(lib):
     V = ctypes.c_void_p
     I = ctypes.c_int
     lib.scan_f32.argtypes = [V, V, V, V, V, I, I, I]
@@ -142,6 +140,26 @@ def load_kernel(force_rebuild: bool = False):
     lib.step_core_f32.argtypes = [V, V, V, V, V, I, I]
     lib.sn_set_threads.argtypes = [I]
     return lib
+
+
+def load_kernel(force_rebuild: bool = False):
+    """按 autograd.Function 里用到的签名批量设好 argtypes."""
+    global _LIB
+    if _LIB is not None and not force_rebuild:
+        return _LIB
+    if not force_rebuild:
+        from .. import _native
+        pre = _native.locate(DLL.name)
+        if pre is not None:
+            _LIB = _bind(ctypes.CDLL(str(pre)))
+            return _LIB
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError(TOOLCHAIN_HINT)
+    if force_rebuild or _needs_rebuild():
+        _compile(gcc)
+    _LIB = _bind(ctypes.CDLL(str(DLL)))
+    return _LIB
 
 
 def load_scan_kernel(force_rebuild: bool = False):

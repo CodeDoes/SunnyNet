@@ -97,7 +97,9 @@ def _find_gcc() -> str | None:
 
 
 def runtime_available() -> bool:
-    return _find_gcc() is not None
+    """有编译器, 或有可用的预编译库。"""
+    from .. import _native
+    return _find_gcc() is not None or _native.locate(DLL.name) is not None
 
 
 def _compile(gcc: str) -> None:
@@ -118,16 +120,7 @@ def _needs_rebuild() -> bool:
                for s in (SRC, HERE / "recur.h"))
 
 
-def load_runtime(force_rebuild: bool = False):
-    global _lib
-    if _lib is not None and not force_rebuild:
-        return _lib
-    gcc = _find_gcc()
-    if gcc is None:
-        raise RuntimeError(TOOLCHAIN_HINT)
-    if force_rebuild or _needs_rebuild():
-        _compile(gcc)
-    lib = ctypes.CDLL(str(DLL))
+def _bind(lib):
     V, I = ctypes.c_void_p, ctypes.c_int
     lib.sn_set_threads.argtypes = [I]
     lib.sn_threads.restype = I
@@ -136,8 +129,26 @@ def load_runtime(force_rebuild: bool = False):
     lib.sn_recur_step.argtypes = [V, V, V, I, I, I]
     lib.sn_quant_i8.argtypes = [V, V, V, I, I, I]
     lib.sn_dequant_i8.argtypes = [V, V, V, I, I, I]
-    _lib = lib
     return lib
+
+
+def load_runtime(force_rebuild: bool = False):
+    global _lib
+    if _lib is not None and not force_rebuild:
+        return _lib
+    if not force_rebuild:
+        from .. import _native
+        pre = _native.locate(DLL.name)
+        if pre is not None:
+            _lib = _bind(ctypes.CDLL(str(pre)))
+            return _lib
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError(TOOLCHAIN_HINT)
+    if force_rebuild or _needs_rebuild():
+        _compile(gcc)
+    _lib = _bind(ctypes.CDLL(str(DLL)))
+    return _lib
 
 
 def _ptr(t):

@@ -47,7 +47,10 @@ version = { attr = "sunnynet.__version__" }
 include = ["sunnynet*"]
 
 [tool.setuptools.package-data]
-sunnynet = ["runtime/*.c", "runtime/*.h", "kernels/*.c", "kernels/*.h"]
+sunnynet = [
+    "runtime/*.c", "runtime/*.h", "kernels/*.c", "kernels/*.h",
+    "_prebuilt/*/*",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

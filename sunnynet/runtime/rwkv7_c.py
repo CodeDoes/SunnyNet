@@ -12,7 +12,8 @@ DLL = BUILD / shlib_name("sunnynet_rwkv7")
 
 
 def rwkv7_available() -> bool:
-    return _find_gcc() is not None
+    from .. import _native
+    return _find_gcc() is not None or _native.locate(DLL.name) is not None
 
 
 def _compile(gcc: str) -> None:
@@ -36,16 +37,7 @@ def _needs_rebuild() -> bool:
 _lib = None
 
 
-def _load():
-    global _lib
-    if _lib is not None:
-        return _lib
-    gcc = _find_gcc()
-    if gcc is None:
-        raise RuntimeError("未找到 C 编译器 (设 SUNNY_W64)")
-    if _needs_rebuild():
-        _compile(gcc)
-    lib = ctypes.CDLL(str(DLL))
+def _bind(lib):
     V, I, P = ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p
     lib.sn_rk_load.restype = V
     lib.sn_rk_load.argtypes = [P]
@@ -58,8 +50,25 @@ def _load():
     lib.sn_rk_vocab.restype = I
     lib.sn_rk_ready.argtypes = [V]
     lib.sn_rk_ready.restype = I
-    _lib = lib
     return lib
+
+
+def _load():
+    global _lib
+    if _lib is not None:
+        return _lib
+    from .. import _native
+    pre = _native.locate(DLL.name)
+    if pre is not None:
+        _lib = _bind(ctypes.CDLL(str(pre)))
+        return _lib
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError("未找到 C 编译器 (设 SUNNY_W64)")
+    if _needs_rebuild():
+        _compile(gcc)
+    _lib = _bind(ctypes.CDLL(str(DLL)))
+    return _lib
 
 
 class SnRWKV7:

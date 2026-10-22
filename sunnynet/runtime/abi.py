@@ -39,7 +39,8 @@ SOURCES = ["sn_abi.c", "recur.c", "rwkv7.c", "quant.c"]
 
 
 def abi_available() -> bool:
-    return _find_gcc() is not None
+    from .. import _native
+    return _find_gcc() is not None or _native.locate(DLL.name) is not None
 
 
 def _compile(gcc: str) -> None:
@@ -65,16 +66,7 @@ def _needs_rebuild() -> bool:
 _lib = None
 
 
-def load_abi(force_rebuild: bool = False):
-    global _lib
-    if _lib is not None and not force_rebuild:
-        return _lib
-    gcc = _find_gcc()
-    if gcc is None:
-        raise RuntimeError("未找到 C 编译器 (设 SUNNY_W64 或把 gcc 加入 PATH)")
-    if force_rebuild or _needs_rebuild():
-        _compile(gcc)
-    lib = ctypes.CDLL(str(DLL))
+def _bind(lib):
     V, I, P = ctypes.c_void_p, ctypes.c_int32, ctypes.c_char_p
     F = ctypes.POINTER(ctypes.c_float)
     lib.sn_abi_version.restype = I
@@ -107,8 +99,26 @@ def load_abi(force_rebuild: bool = False):
     lib.sn_abi_rwkv7_free.argtypes = [V]
     lib.sn_abi_rwkv7_vocab.argtypes = [V]
     lib.sn_abi_rwkv7_vocab.restype = I
-    _lib = lib
     return lib
+
+
+def load_abi(force_rebuild: bool = False):
+    global _lib
+    if _lib is not None and not force_rebuild:
+        return _lib
+    if not force_rebuild:
+        from .. import _native
+        pre = _native.locate(DLL.name)
+        if pre is not None:
+            _lib = _bind(ctypes.CDLL(str(pre)))
+            return _lib
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError("未找到 C 编译器 (设 SUNNY_W64 或把 gcc 加入 PATH)")
+    if force_rebuild or _needs_rebuild():
+        _compile(gcc)
+    _lib = _bind(ctypes.CDLL(str(DLL)))
+    return _lib
 
 
 def status_str(code: int) -> str:
