@@ -8,3 +8,6 @@ prune experiments
 prune data
 prune runs
 prune .ref
+# 本机编译缓存, 不入包
+prune sunnynet/runtime/_build
+prune sunnynet/kernels/_build
