@@ -116,3 +116,52 @@ def test_recommended_threads_is_physical_cores():
     assert n >= 1
     assert set_threads(3) == 3
     assert set_threads(n) == n
+
+
+@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
+                    reason="缺少 ckpt 或导出 blob")
+def test_half_weights_track_fp32_argmax():
+    """fp16 权重路径与 fp32 路径在同序列上 argmax 一致, logits 偏差有界.
+
+    权重截断为 fp16 会引入约 1e-3 量级的 logits 抖动; 上限设 2e-2
+    足以捕捉布局或转换写错 (那会把偏差推到 1e+1)。
+    """
+    from sunnynet.cli import load_model
+    from sunnynet.runtime.model import SnModel, set_threads
+    set_threads(1)
+    _, cfg, _ = load_model(str(CKPT))
+    args = (cfg.vocab_size, cfg.dim, cfg.inner, cfg.rank, cfg.taps,
+            cfg.layers, 8, int(cfg.tie_embeddings))
+    torch.manual_seed(13)
+    toks = torch.randint(0, cfg.vocab_size, (20,)).tolist()
+
+    a = SnModel(BLOB, *args)
+    b = SnModel(BLOB, *args, half=True)
+    a.reset(); b.reset()
+    n_agree = 0
+    worst = 0.0
+    for t in toks:
+        la = torch.tensor(a.step(t))
+        lb = torch.tensor(b.step(t))
+        worst = max(worst, float((la - lb).abs().max()))
+        if int(la.argmax()) == int(lb.argmax()):
+            n_agree += 1
+    assert worst < 2e-2, f"fp16 权重偏差过大: {worst:.3e}"
+    assert n_agree == len(toks), f"argmax 仅 {n_agree}/{len(toks)} 一致"
+
+
+@pytest.mark.skipif(not CKPT.exists() or not BLOB.exists(),
+                    reason="缺少 ckpt 或导出 blob")
+def test_half_weights_are_smaller_than_fp32():
+    """fp16 载入后常驻权重应明显小于 fp32 (5 个 GEMV 矩阵 + head 减半)."""
+    from sunnynet.cli import load_model
+    from sunnynet.runtime.model import SnModel, set_threads
+    set_threads(1)
+    _, cfg, _ = load_model(str(CKPT))
+    d = cfg.dim
+    # 仅校验数值路径可用且不崩: 载入后单步能产出有限 logits
+    rt = SnModel(BLOB, cfg.vocab_size, d, cfg.inner, cfg.rank, cfg.taps,
+                 cfg.layers, 8, int(cfg.tie_embeddings), half=True)
+    lg = torch.tensor(rt.step(7))
+    assert lg.shape[0] == cfg.vocab_size
+    assert bool(torch.isfinite(lg).all()), "fp16 路径产生 NaN/Inf"

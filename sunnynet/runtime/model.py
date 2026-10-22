@@ -47,6 +47,9 @@ def _load():
     V, I, P = ctypes.c_void_p, ctypes.c_int, ctypes.c_char_p
     lib.sn_load.restype = V
     lib.sn_load.argtypes = [P, I, I, I, I, I, I, I, I]
+    if hasattr(lib, "sn_load_h"):
+        lib.sn_load_h.restype = V
+        lib.sn_load_h.argtypes = [P, I, I, I, I, I, I, I, I]
     lib.sn_free.argtypes = [V]
     lib.sn_reset.argtypes = [V]
     lib.sn_step.argtypes = [V, I, V]
@@ -90,12 +93,13 @@ class SnModel:
     """B=1 单序列解码句柄. logits 复用同一缓冲."""
 
     def __init__(self, path, vocab, dim, inner, rank, taps, layers,
-                 group=8, tied=1):
+                 group=8, tied=1, half=False):
         self._lib = _load()
         self._logits = (ctypes.c_float * vocab)()
         self._path = str(path).encode()
-        self._h = self._lib.sn_load(self._path, vocab, dim, inner, rank,
-                                    taps, layers, group, int(tied))
+        load = self._lib.sn_load_h if half else self._lib.sn_load
+        self._h = load(self._path, vocab, dim, inner, rank,
+                       taps, layers, group, int(tied))
         if not self._h:
             raise RuntimeError(f"sn_load 失败: {path} (维度/魔数不匹配)")
         if not self._lib.sn_ready(self._h):

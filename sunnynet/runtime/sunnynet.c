@@ -78,7 +78,8 @@ int sn_recommended_threads(void) {
 #endif
 }
 
-/* 权重在内存中为行主序 (out, in): 输出通道 j 的权重连续。 */
+/* 权重在内存中为行主序 (out, in): 输出通道 j 的权重连续。
+ * half=1 时 5 个 GEMV 权重存 fp16 (wsrc), 其余仍为 fp32。 */
 typedef struct {
     int D, I, R, K;
     const float* ni_g;
@@ -91,6 +92,11 @@ typedef struct {
     const float* Wz_t;   /* W_z 行主序 (I,D) */
     const float* Wc_t;   /* W_c 行主序 (D,I) */
     const float* Ws_t;   /* W_s_eff 行主序 (D,D) */
+    const unsigned short* Vh;  /* fp16 版; half=0 时为 NULL */
+    const unsigned short* Uh;
+    const unsigned short* Wzh;
+    const unsigned short* Wch;
+    const unsigned short* Wsh;
     const float* delta;  /* (D) */
     float a_tanh, b_gain;
     float* s;
@@ -98,14 +104,16 @@ typedef struct {
 } SnLayer;
 
 struct SnModel {
-    int vocab, D, I, R, K, L, group, tied, clamp;
+    int vocab, D, I, R, K, L, group, tied, clamp, half;
     float eps, p_floor;
     float* wbuf;
+    unsigned short* hbuf;  /* fp16 5 个 GEMV 权重 + head; half=0 时为 NULL */
     SnLayer* layers;
     const float* no_g;
     const float* no_c;
     const float* embed;  /* (vocab,D) 查表用 */
     const float* head_t; /* (D,vocab) 输出投影用 */
+    const unsigned short* head_h;
     float* sc;           /* 单层工作区 */
     float* sc2;          /* 顶层工作区 (x,lout,nrm) */
     int ready;
@@ -125,6 +133,35 @@ static void gemv(float* y, const float* x, const float* W, int in, int out) {
         _mm256_storeu_ps(t, acc);
         float s = t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
         for (; i < in; ++i) s += row[i] * x[i];
+        y[j] = s;
+    }
+}
+
+/* 同接口但权重为 fp16: 每次读 16 个 half (32B) 转 fp32 做 FMA。
+ * 读字节减半, 是访存受限单步解码的唯一实质杠杆。 */
+static void gemv_h(float* y, const float* x, const unsigned short* W, int in,
+                   int out) {
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < out; ++j) {
+        const unsigned short* row = W + (size_t)j * in;
+        __m256 a0 = _mm256_setzero_ps(), a1 = _mm256_setzero_ps();
+        int i = 0;
+        for (; i + 16 <= in; i += 16) {
+            __m256i h = _mm256_loadu_si256((const __m256i*)(row + i));
+            __m256 w0 = _mm256_cvtph_ps(_mm256_castsi256_si128(h));
+            __m256 w1 = _mm256_cvtph_ps(_mm256_extracti128_si256(h, 1));
+            a0 = _mm256_fmadd_ps(w0, _mm256_loadu_ps(x + i), a0);
+            a1 = _mm256_fmadd_ps(w1, _mm256_loadu_ps(x + i + 8), a1);
+        }
+        a0 = _mm256_add_ps(a0, a1);
+        for (; i + 8 <= in; i += 8)
+            a0 = _mm256_fmadd_ps(
+                _mm256_cvtph_ps(_mm_loadu_si128((const __m128i*)(row + i))),
+                _mm256_loadu_ps(x + i), a0);
+        float t[8];
+        _mm256_storeu_ps(t, a0);
+        float s = t[0] + t[1] + t[2] + t[3] + t[4] + t[5] + t[6] + t[7];
+        for (; i < in; ++i) s += (float)row[i] * x[i];
         y[j] = s;
     }
 }
@@ -202,8 +239,13 @@ static void layer_step(SnModel* m, SnLayer* L, const float* x, float* out, float
         memcpy(at, raw, sizeof(float) * D);
     }
 
-    gemv(v, at, L->Vt, D, R);
-    gemv(q, v, L->Ut, R, 2 * D);
+    if (m->half) {
+        gemv_h(v, at, L->Vh, D, R);
+        gemv_h(q, v, L->Uh, R, 2 * D);
+    } else {
+        gemv(v, at, L->Vt, D, R);
+        gemv(q, v, L->Ut, R, 2 * D);
+    }
     memcpy(u, q, sizeof(float) * D);
     memcpy(gate, q + D, sizeof(float) * D);
 
@@ -214,7 +256,8 @@ static void layer_step(SnModel* m, SnLayer* L, const float* x, float* out, float
     }
 
     /* sfb 依赖上一时刻状态, 必须在状态更新前算 */
-    gemv(sfb, L->s, L->Ws_t, D, D);
+    if (m->half) gemv_h(sfb, L->s, L->Wsh, D, D);
+    else gemv(sfb, L->s, L->Ws_t, D, D);
 
     for (int i = 0; i < D; ++i) {
         float p = 1.0f - L->delta[i] * (1.0f - sgn(gate[i]));
@@ -222,12 +265,14 @@ static void layer_step(SnModel* m, SnLayer* L, const float* x, float* out, float
         L->s[i] = p * L->s[i] + (1.0f - p) * u[i];
     }
 
-    gemv(zn, u, L->Wz_t, D, I);
+    if (m->half) gemv_h(zn, u, L->Wzh, D, I);
+    else gemv(zn, u, L->Wz_t, D, I);
     for (int i = 0; i < I; ++i)
         zn[i] *= 1.0f + 0.5f * L->a_tanh / (1.0f + fabsf(zn[i]));
     layernorm(yn, zn, L->nm_g, L->nm_c, I, m->eps);
 
-    gemv(out, yn, L->Wc_t, I, D);
+    if (m->half) gemv_h(out, yn, L->Wch, I, D);
+    else gemv(out, yn, L->Wc_t, I, D);
     for (int i = 0; i < D; ++i) out[i] += L->b_gain * L->s[i] + sfb[i] + x[i];
 
     if (dbg) {
@@ -266,6 +311,7 @@ void sn_free(SnModel* m) {
         }
     }
     free(m->wbuf);
+    free(m->hbuf);
     free(m->layers);
     free(m->sc);
     free(m->sc2);
@@ -283,7 +329,8 @@ void sn_step(SnModel* m, int token, float* logits) {
         memcpy(x, lout, sizeof(float) * D);
     }
     layernorm(nrm, x, m->no_g, m->no_c, D, m->eps);
-    gemv(logits, nrm, m->head_t, D, m->vocab);
+    if (m->half) gemv_h(logits, nrm, m->head_h, D, m->vocab);
+    else gemv(logits, nrm, m->head_t, D, m->vocab);
 }
 
 void sn_dbg_layer(SnModel* m, int token, int layer, float* dbg) {
@@ -396,6 +443,131 @@ SnModel* sn_load(const char* path, int vocab, int dim, int inner, int rank,
         if (!L->s || !L->hist) { sn_free(m); return NULL; }
     }
     flip_inplace((float*)m->head_t, dim, m->vocab);
+
+    const size_t scn = (size_t)3 * dim + rank + (size_t)2 * dim + (size_t)2 * dim +
+                       (size_t)2 * inner + dim;
+    m->sc = (float*)calloc(scn, sizeof(float));
+    m->sc2 = (float*)calloc((size_t)3 * dim, sizeof(float));
+    if (!m->sc || !m->sc2) { sn_free(m); return NULL; }
+    m->ready = 1;
+    return m;
+}
+
+/* fp16 权重版: 5 个 GEMV 矩阵与 head 只存 fp16, 小参数仍为 fp32。
+ * 每步读的字节数从 421MB 降到约 232MB, 是访存受限单步解码的实质杠杆。
+ * 权重数值由 fp32 截断而来, logits 相对偏差约 7e-4。 */
+SnModel* sn_load_h(const char* path, int vocab, int dim, int inner, int rank,
+                   int taps, int layers, int group, int tied) {
+    FILE* f = sn_fopen(path, "rb");
+    if (!f) return NULL;
+    int32_t h[10];
+    if (!rd_i32(f, h, 10) || h[0] != SN_MAGIC || h[1] != vocab || h[2] != dim ||
+        h[3] != inner || h[4] != rank || h[5] != taps || h[6] != layers ||
+        h[7] != group || h[8] != tied) {
+        fclose(f);
+        return NULL;
+    }
+    SnModel* m = (SnModel*)calloc(1, sizeof(SnModel));
+    if (!m) { fclose(f); return NULL; }
+    m->vocab = vocab; m->D = dim; m->I = inner; m->R = rank;
+    m->K = taps; m->L = layers; m->group = group; m->tied = h[8];
+    m->clamp = h[9];
+    m->half = 1;
+
+    const size_t nv = (size_t)dim * rank, nu = (size_t)rank * 2 * dim;
+    const size_t nz = (size_t)dim * inner, nc = (size_t)inner * dim;
+    const size_t ns = (size_t)dim * dim, nh = (size_t)dim * vocab;
+    const size_t big16 = nv + nu + nz + nc + ns;
+    /* fp32 侧只留小参数 */
+    const size_t small = (size_t)2 * dim + (size_t)2 * inner + (size_t)taps * dim +
+                         dim + 2;
+    const size_t total_small = (size_t)layers * small + 2 + 2 * (size_t)dim +
+                               (size_t)vocab * dim;
+    m->wbuf = (float*)malloc(sizeof(float) * total_small);
+    m->hbuf = (unsigned short*)malloc(sizeof(unsigned short) *
+                                      ((size_t)layers * big16 + nh));
+    m->layers = (SnLayer*)calloc((size_t)layers, sizeof(SnLayer));
+    if (!m->wbuf || !m->hbuf || !m->layers) { sn_free(m); fclose(f); return NULL; }
+
+    float* p = m->wbuf;
+    unsigned short* hp = m->hbuf;
+    /* 大块读进临时 fp32 缓冲, 翻转成行主序后截断为 fp16 */
+    const size_t tmpn = nv > nh ? nv : nh;
+    float* tmp = (float*)malloc(sizeof(float) * tmpn);
+    if (!tmp) { sn_free(m); fclose(f); return NULL; }
+
+    for (int l = 0; l < layers; ++l) {
+        SnLayer* L = &m->layers[l];
+        L->D = dim; L->I = inner; L->R = rank; L->K = taps;
+        L->ni_g = p; p += dim;
+        L->ni_c = p; p += dim;
+        L->nm_g = p; p += inner;
+        L->nm_c = p; p += inner;
+        L->dw_t = p; p += (size_t)taps * dim;
+        if (!rd_f32(f, L->ni_g, (size_t)2 * dim + (size_t)2 * inner +
+                                     (size_t)taps * dim)) {
+            free(tmp); sn_free(m); fclose(f); return NULL;
+        }
+        const size_t blk[5] = {nv, nu, nz, nc, ns};
+        const int shp[5][2] = {{dim, rank}, {rank, 2 * dim}, {dim, inner},
+                               {inner, dim}, {dim, dim}};
+        const unsigned short* dst[5];
+        for (int k = 0; k < 5; ++k) {
+            if (blk[k] > tmpn) {
+                free(tmp); sn_free(m); fclose(f); return NULL;
+            }
+            if (!rd_f32(f, tmp, blk[k])) {
+                free(tmp); sn_free(m); fclose(f); return NULL;
+            }
+            flip_inplace(tmp, shp[k][0], shp[k][1]);
+            for (size_t i = 0; i < blk[k]; ++i) hp[i] = _cvtss_sh(tmp[i], 0);
+            dst[k] = hp;
+            hp += blk[k];
+        }
+        L->Vh = dst[0]; L->Uh = dst[1]; L->Wzh = dst[2];
+        L->Wch = dst[3]; L->Wsh = dst[4];
+        /* fp32 指针保持 NULL: half=1 时 layer_step 只走 gemv_h 分支,
+         * 误用会立刻段错误而不是读出静默错误的数据。 */
+
+        L->delta = p; p += dim;
+        float* scal = p; p += 2;
+        (void)scal;
+        if (!rd_f32(f, L->delta, (size_t)dim + 2)) {
+            free(tmp); sn_free(m); fclose(f); return NULL;
+        }
+        L->a_tanh = scal[0];
+        L->b_gain = scal[1];
+
+        L->s = (float*)calloc((size_t)dim, sizeof(float));
+        L->hist = (float*)calloc((size_t)(taps > 1 ? taps - 1 : 1) * dim,
+                                 sizeof(float));
+        if (!L->s || !L->hist) { free(tmp); sn_free(m); fclose(f); return NULL; }
+    }
+    free(tmp);
+
+    float* eps = p; p += 1;
+    float* pfloor = p; p += 1;
+    float* no_g = p; p += dim;
+    float* no_c = p; p += dim;
+    float* embed = p; p += (size_t)vocab * dim;
+    if (!rd_f32(f, eps, (size_t)2 + (size_t)2 * dim + (size_t)vocab * dim)) {
+        sn_free(m); fclose(f); return NULL;
+    }
+    m->eps = *eps;
+    m->p_floor = *pfloor;
+    m->no_g = no_g;
+    m->no_c = no_c;
+    m->embed = embed;
+
+    /* head: 与 sn_load 一致的翻转 (dim, vocab), 再截断 fp16 */
+    float* htmp = (float*)malloc(sizeof(float) * nh);
+    if (!htmp) { sn_free(m); fclose(f); return NULL; }
+    if (!rd_f32(f, htmp, nh)) { free(htmp); sn_free(m); fclose(f); return NULL; }
+    flip_inplace(htmp, dim, vocab);
+    for (size_t i = 0; i < nh; ++i) hp[i] = _cvtss_sh(htmp[i], 0);
+    m->head_h = hp;
+    free(htmp);
+    fclose(f);
 
     const size_t scn = (size_t)3 * dim + rank + (size_t)2 * dim + (size_t)2 * dim +
                        (size_t)2 * inner + dim;

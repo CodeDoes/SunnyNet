@@ -60,3 +60,4 @@ experiments/gguf/
 dist/
 build/
 *.egg-info/
+experiments/*.exe

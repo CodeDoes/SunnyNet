@@ -303,6 +303,9 @@ def main(argv=None):
     ap.add_argument("--blob", default=None, help="--backend c 的权重 blob 路径")
     ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
+    ap.add_argument("--half", action="store_true",
+                    help="--backend c 时把 GEMV 权重与 head 载入为 fp16; "
+                         "读字节减半, 单步约快 1.3x, logits 相对偏差约 7e-4")
     ap.add_argument("--hf-dir", default=None,
                     help="HF 权重目录 (Mamba-2 / DeltaNet / GLA), 与 --ckpt/--gguf 三选一")
     ap.add_argument("--hf-arch", choices=["mamba2", "deltanet", "gla"], default="mamba2",
@@ -340,7 +343,8 @@ def main(argv=None):
                              f"先运行: python -X utf8 experiments/_export_runtime.py "
                              f"{args.ckpt} {blob}")
         runtime = SnModel(blob, cfg.vocab_size, cfg.dim, cfg.inner, cfg.rank,
-                          cfg.taps, cfg.layers, 8, int(cfg.tie_embeddings))
+                          cfg.taps, cfg.layers, 8, int(cfg.tie_embeddings),
+                          half=args.half)
 
     pieces = []
     for p in decode_stream(model, tk, args.prompt, args.max_new,

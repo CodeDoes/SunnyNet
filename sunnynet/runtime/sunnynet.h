@@ -22,6 +22,11 @@ typedef struct SnModel SnModel;
 SnModel* sn_load(const char* path, int vocab, int dim, int inner, int rank,
                  int taps, int layers, int group, int tied);
 
+/* 同上, 但 5 个 GEMV 矩阵与 LM head 在载入时转成 fp16。
+ * 每步读的字节数约减半; 权重数值相对偏差约 7e-4, 用于访存受限的解码。 */
+SnModel* sn_load_h(const char* path, int vocab, int dim, int inner, int rank,
+                   int taps, int layers, int group, int tied);
+
 void sn_free(SnModel* m);
 void sn_reset(SnModel* m);
 

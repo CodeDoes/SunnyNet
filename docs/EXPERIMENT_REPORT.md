@@ -2387,6 +2387,79 @@ GEMV 改成按输出通道并行的连续读。
 不得据此外推训练或 prefill（prefill 走同一 `sn_step` 循环，无批量并行）。
 原实现 75.75→76.60 的差异来自测量脚本不同（前者含 `_load` 首次调用），不作陈述。
 
+### 24.7c 权重存 fp16：把每步读取字节减半
+
+§24.7b 之后单步仍是访存受限：`bench_layer.c` 里纯 GEMV 循环（41 次调用、无串行段）
+在 6 线程下 14.67 ms（31.87 GB/s），而会话语境 21.6 ms —— 相邻调用间有状态依赖，
+`gemv` 各自建 parallel 区，热力分散。既然内核已达纯顺序读上限，剩下的杠杆只有一个：
+**每步少读字节**。
+
+把 5 个 GEMV 矩阵与 LM head 在载入时截断成 fp16，小参数（layernorm 的 g/c、conv 抽头、
+delta、标量、embed）保持 fp32：
+
+| | fp32 | fp16 |
+|---|---|---|
+| 大矩阵权重 | 421.0 MB | 210.5 MB |
+| 单步实读 | 467.6 MB | 约 222.3 MB |
+
+内核 `gemv_h` 一次 `_mm256_loadu_si256` 读 16 个 half（32 B），拆成两个 `__m128i`
+各经 `_mm256_cvtph_ps` 转 8 个 float 做 FMA —— 保持与 fp32 相同的 32 B 加载宽度。
+`bench_f16b.c` 对比加载宽度（同一份 fp16 权重）：
+
+| 线程 | fp32 | f16 128 位加载 | **f16 256 位加载** | 256 位/fp32 |
+|---|---|---|---|---|
+| 1 | 24.36 | 17.45 | **15.06** | 1.62× |
+| 2 | 19.66 | 11.43 | **12.81** | 1.53× |
+| 4 | 15.24 | 10.77 | **9.99** | 1.53× |
+| 8 | 15.36 | 9.88 | **9.08** | 1.69× |
+
+128 位加载损失了加载宽度，单线程反而慢于 256 位；两种加载数值完全一致
+（vs fp32 的 max\|diff\| 均为 1.805e-04），所以取 256 位。
+
+**误差有界，但不是逐位一致**。`experiments/verify_h.c`（C 直连，同 blob 同序列）：
+
+| 口径 | 结果 |
+|---|---|
+| logits max\|diff\| 最坏 | 4.181e-03 |
+| 相对偏差 | 7.42e-04 |
+| **argmax 一致** | **64 / 64** |
+| 末态各层 state max\|diff\| | 1.226e-02 |
+
+fp16 只有 10 位尾数，权重相对误差约 5e-4，因此 7e-4 的 logits 相对偏差是量级内的
+必然结果。偏差随步数累积但保持在 argmax 之下（本序列 64/64）。
+
+**A/B 对照**（`experiments/_ab_fp16.py`：同一进程、同一 blob、11 轮交错
+head-to-head、6 物理核）：
+
+| 口径 | fp32 | fp16 |
+|---|---|---|
+| 中位 ms/token | 24.67 | **18.60** |
+| min ms/token | 22.20 | **17.26** |
+| 有效带宽（按 fp32 等价字节） | 18.95 GB/s | 25.14 GB/s |
+| **逐轮配对** | — | **11/11 全胜** |
+
+加速 **1.33×**（min 口径 1.29×），逐轮配对差中位 6.07 ms 且全为正。
+
+**fp16 不再是访存受限**。fp16 实读 222.3 MB，18.6 ms 只对应 **12.0 GB/s**，
+远低于 fp32 的 19 GB/s —— 瓶颈转移到 `cvtph_ps` 转换与指令发射。线程缩放
+（`experiments/_fp16_threads.py`）因此对两者都不敏感：
+
+| 线程 | 2 | 3 | 4 | 6 | 8 | 12 |
+|---|---|---|---|---|---|---|
+| fp32 中位 ms | 38.68 | 31.17 | 25.75 | 26.24 | 27.39 | 27.25 |
+| fp16 中位 ms | 28.48 | 23.98 | 21.36 | **19.95** | 20.71 | 20.60 |
+| 加速 | 1.36× | 1.30× | 1.21× | 1.32× | 1.32× | 1.32× |
+
+**用法**：`--backend c --half`（Python 侧 `SnModel(..., half=True)`）。
+fp32 仍是默认，逐位不变。CLI 实测 `--half` 下 decode 20.96 ms/tok。
+
+**边界**：① 1.33× 是本机单步小数，不得外推 prefill 或训练；
+② 端到端低于算子级（`bench_f16b.c` 4 线程 1.53×）—— 与既有纪律一致，
+算子级微基准优势会被端到端摊薄；③ 相对偏差 7.4e-04 会让长序列的 greedy
+解码偶发分歧，本序列 64/64 只是样本；需要逐位复现时用 fp32；
+④ 权重文件仍是 fp32 blob，fp16 只在载入时转换，磁盘占用不变
+（要减小磁盘占用需另做导出，未做）。
+
 ### 24.8 命令行推理
 
 `sunnynet/cli.py`，`python -m sunnynet.cli --ckpt <path> --prompt "..."`。
@@ -2808,6 +2881,8 @@ python -X utf8 experiments/_export_runtime.py \
     experiments/ckpts_ood/sunnynet.pt experiments/ckpts_ood/sunnynet.runtime.bin
 python -X utf8 experiments/_runtime_model_equiv.py           # §24.7 C vs torch
 python -X utf8 experiments/_runtime_decode.py 256,1024,2048 3  # §24.7 解码延迟
+python -X utf8 experiments/_ab_fp16.py                        # §24.7c fp16 vs fp32
+python -X utf8 experiments/_fp16_threads.py                   # §24.7c fp16 线程缩放
 python -X utf8 experiments/_rwkv7_gguf_equiv.py              # §24.9 GGUF vs .pth
 python -X utf8 experiments/_rwkv7_gguf_bench.py              # §24.9 numpy 生成
 python -X utf8 experiments/_export_rwkv7.py                  # §24.10 导出 C blob (需 GGUF)

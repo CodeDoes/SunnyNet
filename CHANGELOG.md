@@ -1,5 +1,15 @@
 # Changelog
 
+## 未发布
+
+### fp16 权重解码路径
+- 新增 `sn_load_h()`：载入时把 5 个 GEMV 矩阵与 LM head 截断为 fp16，小参数仍 fp32；
+  单步实读 467.6 → 约 222.3 MB。内核 `gemv_h` 一次读 16 个 half（32 B）后转 fp32 做
+  FMA，保持与 fp32 相同的加载宽度。
+- `p100mw` 单步 24.67 → **18.60 ms/token**（**1.33×**，11 轮交错 11/11 占优）。
+  logits max|diff| 4.181e-03、相对偏差 7.42e-04、argmax 64/64。
+- Python 侧 `SnModel(..., half=True)`，CLI `--backend c --half`。fp32 仍是默认，逐位不变。
+
 ## v0.2.0
 
 ### 推理 Runtime 访存重构
