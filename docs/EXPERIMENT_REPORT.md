@@ -3071,7 +3071,7 @@ AVX2+FMA 的机器能执行，故判定按**指令集**而非仅按平台（`isa
 | 差值 26 的含义 | 原先因缺编译器**跳过**的用例现在真实执行 |
 | 完全隔离（无源码树、无 gcc、`PYTHONPATH` 指向安装目录） | **106 passed / 30 skipped / exit 0** |
 | 有 gcc + 源码树全量测试 | **126 passed / 10 skipped / exit 0**（无回归） |
-| wheel 内预编译产物 | 6 个 dll，wheel 总 55 文件，标签 `py3-none-win_amd64` |
+| wheel 内预编译产物 | 11 个 `_prebuilt/` 条目（10 个 dll + `sources.sha256`），wheel 总 74 文件，标签 `py3-none-win_amd64` |
 
 `SUNNY_NO_PREBUILT=1` 可强制关闭预编译短路，用于上表第一行的对照验证。
 
@@ -3132,9 +3132,16 @@ Linux 下是 `sunnynet_runtime.so`，故 `man["sunnynet_runtime.dll"]` 直接 `K
 `ubuntu-latest` 两个矩阵上红。修法：测试从模块取 `DLL.name`，不写字面量。
 提交 `8a7bfa4` 的 CI 已因此失败。
 
-**契约测试**：`tests/test_native_prebuilt.py` 现 7 项，覆盖清单与源码一致、篡改哈希
-判过期、无清单不误判、源码缺失不误判、已加载态下重建、重建后清缓存，以及每个模块都
-提供 `_link_cmd` 与 `DLL`。用例名一律取自模块属性，跨平台可跑。
+五、**漏登记新架构库不会让任何测试变红**。`build_prebuilt()` 只按 `MODULES` 遍历；
+新增的 `runtime/<arch>_c.py` 若忘了加进 `MODULES`，既不进 wheel、也不写清单，装机后
+只能退回源码编译（需自带 C 编译器），而在装了编译器的开发机上完全看不出来。加入
+`hgrn2_c` 后曾发现 `_prebuilt/win-x86_64/` 里少了 `sunnynet_hgrn2.dll`。修法：新增反向
+覆盖用例，`runtime/` 下每个 `*_c.py` 都必须登记进 `MODULES`。
+
+**契约测试**：`tests/test_native_prebuilt.py` 现 8 项，覆盖清单与源码一致、篡改哈希
+判过期、无清单不误判、源码缺失不误判、已加载态下重建、重建后清缓存、每个模块都
+提供 `_link_cmd` 与 `DLL`，以及反向覆盖（每个 `*_c.py` 都在 `MODULES` 里）。
+用例名一律取自模块属性，跨平台可跑。
 
 ---
 

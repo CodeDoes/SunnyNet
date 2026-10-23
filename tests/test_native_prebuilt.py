@@ -28,6 +28,19 @@ def test_sources_cover_all_modules():
         assert hasattr(mod, "DLL"), f"{name} 缺 DLL"
 
 
+def test_every_runtime_c_module_is_registered():
+    """runtime/ 下的每个 *_c.py 都要登记进 MODULES。
+
+    漏登记不会让任何测试变红: build_prebuilt 只按 MODULES 遍历, 缺登记的库
+    既不进 wheel 也不写清单, 装机后只能退回源码编译 (需自带 C 编译器)。
+    真实发生过 —— 新增 hgrn2_c 后 _prebuilt/ 里少了 sunnynet_hgrn2.dll。
+    """
+    rt = _native.HERE / "runtime"
+    for p in sorted(rt.glob("*_c.py")):
+        name = f"sunnynet.runtime.{p.stem}"
+        assert name in _native.MODULES, f"{name} 未登记进 MODULES"
+
+
 def test_manifest_written_and_matches(tmp_path):
     made, err = _native.build_prebuilt(tmp_path)
     if err:
