@@ -200,13 +200,15 @@ def _dn_vocab(blob: str, hf_dir: str) -> int:
     import struct
     with open(blob, "rb") as f:
         h = struct.unpack("<8if3i", f.read(8 * 4 + 4 + 12))
-    if h[0] != 0x4E4E4444:
-        raise SystemExit(f"不是 DeltaNet blob (magic {h[0]:#x}): {blob}")
-    return int(h[9])
+    if h[0] == 0x4E4E4444:                 # DeltaNet
+        return int(h[9])
+    if h[0] == 0x324E4D53:                 # Mamba-2
+        return int(h[9])
+    raise SystemExit(f"不是 C 内核 blob (magic {h[0]:#x}): {blob}")
 
 
-class _DeltaNetCAdapter:
-    """把 C 句柄包成 CLI 期望的 step(token, state) 接口 (state 由 C 侧持有)。"""
+class _CAdapter:
+    """把整模型 C 句柄包成 CLI 期望的 step(token, state) 接口 (state 由 C 侧持有)。"""
 
     def __init__(self, handle, hf_dir: str):
         self.h = handle
@@ -230,9 +232,13 @@ def _dn_layers(hf_dir: str) -> int:
     p = os.path.join(hf_dir, "config.json")
     try:
         with open(p, encoding="utf-8") as f:
-            return int(json.load(f).get("num_hidden_layers", 0))
+            c = json.load(f)
     except Exception:
         return 0
+    for k in ("num_hidden_layers", "n_layer"):
+        if k in c:
+            return int(c[k])
+    return 0
 
 
 def _main_hf(args) -> int:
@@ -249,12 +255,20 @@ def _main_hf(args) -> int:
         raise SystemExit(f"未支持的 --hf-arch: {args.hf_arch}")
 
     t0 = time.perf_counter()
-    if args.hf_arch == "deltanet" and args.blob:
+    c_arch = None
+    if args.blob and args.hf_arch == "deltanet":
+        c_arch = "deltanet"
+    elif args.blob and args.hf_arch == "mamba2":
+        c_arch = "mamba2"
+    if c_arch == "deltanet":
         # 整模型 C 内核: 前向全在 C, 与 numpy 参考路径逐 token 一致
         from .runtime.deltanet_c import SnDeltaNet
-        vocab = _dn_vocab(args.blob, args.hf_dir)
-        m = _DeltaNetCAdapter(SnDeltaNet(args.blob, vocab, threads=args.threads),
-                              args.hf_dir)
+        m = _CAdapter(SnDeltaNet(args.blob, _dn_vocab(args.blob, args.hf_dir),
+                                 threads=args.threads), args.hf_dir)
+    elif c_arch == "mamba2":
+        from .runtime.mamba2_c import SnMamba2
+        m = _CAdapter(SnMamba2(args.blob, _dn_vocab(args.blob, args.hf_dir),
+                               threads=args.threads), args.hf_dir)
     else:
         m = Model(args.hf_dir)
     load_s = time.perf_counter() - t0
@@ -293,9 +307,7 @@ def _main_hf(args) -> int:
         step_times.append(time.perf_counter() - t0)
     text = tk.decode(out) if tk is not None else ""
     st = {
-        "backend": (f"hf/{args.hf_arch}/c"
-                    if args.hf_arch == "deltanet" and args.blob
-                    else f"hf/{args.hf_arch}"),
+        "backend": f"hf/{args.hf_arch}/c" if c_arch else f"hf/{args.hf_arch}",
         "load_ms": load_s * 1e3,
         "prefill_tokens": len(ids),
         "prefill_ms": prefill_s * 1e3,
@@ -352,7 +364,8 @@ def main(argv=None):
                     help="--gguf 时的执行后端; c = C 内核整模型单步")
     ap.add_argument("--blob", default=None,
                     help="C 内核权重 blob: RWKV-7 的 --gguf-backend c 用它, "
-                         "或 --hf-arch deltanet 时指向 deltanet.c.bin (整模型在 C)")
+                         "或 --hf-arch deltanet|mamba2 时指向对应的 .c.bin "
+                         "(整模型前向在 C)")
     ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
     ap.add_argument("--half", action="store_true",

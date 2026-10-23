@@ -2794,14 +2794,69 @@ RWKV-7 的 5.39× 来自它的 numpy 参考（部分整段物化，366 ms）远�
    第一版额外做了一份转置，反而算错。三个 tie 场景（`tied_head=1`）须与 HF 的
    `lm_head` 语义对齐后再定布局。
 
-定位手段：在 C 侧加 `sn_dn_dbg` / `sn_dn_dbg3` 转储逐层与层内各阶段中间量，
-与 numpy 参考**逐项**对表。五处缺陷里有四处是纯数值错位（不崩、不报错），
-只能靠中间量比对揪出。
+**（9）Mamba-2 整模型进 C**（`runtime/mamba2.c`）
+
+§24.12(5) 已述 Mamba-2 的衰减 `dA = exp(dt·A)` 对 `(p,n)` 全同、外积可分解，故每 head
+状态是元素级一阶递推，比 DeltaNet 的 rank-1 形式更简单。整模型前向搬进
+`runtime/mamba2.c`（`sn_m2_load` / `sn_m2_step` / `sn_m2_prefill` / `sn_m2_dbg`），
+权重由 `experiments/_export_mamba2.py` 导成 516 MB fp32 blob（`--blob` 指向它）。
+
+逐 token 对照 numpy 参考（`experiments/_mamba2_c_equiv.py`，36 token）：
+
+| 检查 | 结果 |
+|---|---|
+| logits max\|diff\| | **1.678e-04** |
+| 相对误差 | **6.307e-06** |
+| argmax 一致 | **36/36** |
+
+绝对误差比 DeltaNet（1.335e-05）大一个量级，但相对只有 6.3e-06。逐层对表
+（`experiments/_mamba2_layer_probe.py`，每层后主流 `x` 与参考的独立实现比）确认
+**没有系统性偏差**：24 层逐层相对误差全落在 **4e-08 ~ 1.1e-06**，且不随层数放大
+（token=415 越往后反而越小）。
+
+| token | layer 0 rel | layer 12 rel | layer 23 rel | \|x\|max @L23 |
+|---|---|---|---|---|
+| 1 | 3.87e-07 | 2.15e-07 | 1.02e-06 | 730.3 |
+| 415 | 2.71e-07 | 5.31e-08 | 1.11e-07 | 685.0 |
+| 5565 | 2.11e-07 | 3.98e-08 | 1.26e-07 | 606.4 |
+
+token=1 的绝对误差最大（7.477e-04）只是因该 token 的最后一层激活被放大到 `|x|max=730`，
+相对仍是 1.0e-06。⇒ 差异是单步内 3352 维归约顺序的单精度噪声，不是累积、不是公式错误。
+
+速度（`experiments/_mamba2_c_bench.py`，每格独立子进程 × 5 轮交错，40 步中位）：
+
+| 轮 | numpy ms | C ms | C 倍数 |
+|---|---|---|---|
+| 0 | 63.20 | 39.09 | 1.62× |
+| 1 | 57.80 | 33.96 | 1.70× |
+| 2 | 47.36 | 34.59 | 1.37× |
+| 3 | 46.96 | 33.21 | 1.41× |
+| 4 | 44.87 | 35.38 | 1.27× |
+| 中位 | 47.36 | 34.59 | **1.37×（5/5 逐轮占优）** |
+
+比 DeltaNet 的 1.10× 高，原因同样是带宽：Mamba-2 权重只有 0.52 GB（fp32），是 DeltaNet
+1.37 GB 的 38%，两条路径都没贴到 18.63 GB/s 的上限。⇒ **同一结论**：整模型解码的 C 化收益
+由「权重字节数 / 可用带宽」决定，权重越小、越远离带宽墙，语言层能拿到的比例越高。
+
+CLI 端到端（`--hf-arch mamba2 --blob`，backend 标 `hf/mamba2/c`）：
+
+```
+The capital of France is a city of the French people, and the capital of the French Republic.
+It is the capital of the Republic of France
+[load 221.7 ms; prefill 5 tok 201.3 ms; decode 24 tok 37.38 ms/tok]
+```
+
+**（10）Mamba-2 C 内核的自查**：`sn_m2_dbg` 会推进状态，逐层对表时**每次调用前必须
+`reset`**，否则第二次起读到的是累积态。此坑在 DeltaNet 侧同样存在（`sn_dn_dbg`），
+首次写探针时踩到。
+
+定位手段：在 C 侧加 `sn_dn_dbg` 转储逐层中间量，与 numpy 参考**逐项**对表。
+五处缺陷里有四处是纯数值错位（不崩、不报错），只能靠中间量比对揪出。
 
 ### 24.13 预编译原生库
 
 前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`，
-§24.12 加入 DeltaNet 整模型库后为 **7 个**）
+§24.12 依次加入 DeltaNet 与 Mamba-2 整模型库后为 **8 个**）
 原本都在**首次调用时用本机 gcc 现编**，因此 `pip install` 之后仍需另装 C 编译器。
 本节把编译挪到 **wheel 构建期**：构建机上编好、产物随包分发，装机后直接加载。
 
@@ -3099,8 +3154,13 @@ python -X utf8 experiments/_export_deltanet.py MDIR MDIR/deltanet.c.bin  # §24.
 python -X utf8 experiments/_deltanet_c_equiv.py              # §24.12 DeltaNet C vs numpy
 python -X utf8 experiments/_deltanet_c_bench.py 5            # §24.12 DeltaNet C 速度
 python -X utf8 experiments/_deltanet_check.py                # §24.12 DeltaNet 正确性
+python -X utf8 experiments/_export_mamba2.py MDIR MDIR/mamba2.c.bin  # §24.12 导出 C blob
+python -X utf8 experiments/_mamba2_c_equiv.py                # §24.12 Mamba-2 C vs numpy
+python -X utf8 experiments/_mamba2_layer_probe.py            # §24.12 Mamba-2 逐层对表
+python -X utf8 experiments/_mamba2_c_bench.py 5              # §24.12 Mamba-2 C 速度
 python -X utf8 -m pytest tests/test_mat_scan.py -v
 python -X utf8 -m pytest tests/test_deltanet_c.py -v
+python -X utf8 -m pytest tests/test_mamba2_c.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。

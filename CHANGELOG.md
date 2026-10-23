@@ -14,6 +14,19 @@
 - 线程数取物理核（6 线程 64.33 ms / 21.24 GB/s，优于 12 逻辑核 68.55 ms）；
   默认自动取物理核。`tests/test_deltanet_c.py` 7 项。
 
+### Mamba-2 整模型 C 内核
+- `runtime/mamba2.c`：整个前向在 C（单路深度短卷积 + 元素级状态递推 + RMSNorm，
+  无 L2/双 norm/SwiGLU MLP，衰减沿 state 维广播故无需矩阵乘），权重由
+  `experiments/_export_mamba2.py` 导成 516 MB fp32 blob。
+  Python 侧 `sunnynet.runtime.mamba2_c.SnMamba2`，CLI `--hf-arch mamba2 --blob`。
+- 对 numpy 参考路径 36 token：logits max|diff| **1.678e-04**、相对 **6.307e-06**、
+  argmax **36/36**。绝对误差比 DeltaNet 大一个量级，逐层对表
+  （`experiments/_mamba2_layer_probe.py`）确认 24 层相对误差全在 4e-08 ~ 1.1e-06
+  且不随层数放大 ⇒ 单步归约顺序噪声，非累积、非公式错误。
+- 速度单步 47.36 → **34.59 ms/token（1.37×，5/5 逐轮占优）**。倍数高于 DeltaNet 的
+  1.10× 同样是带宽原因：权重 0.52 GB 仅为 DeltaNet 1.37 GB 的 38%，
+  两条路径都未贴到 18.63 GB/s 上限。`tests/test_mamba2_c.py` 7 项。
+
 ### 矩阵值 rank-1 递推内核
 - 新增 `sn_mat_scan`（`runtime/recur.c`，声明见 `recur.h`）：统一形式
   `p=S·u; S=S⊙w+v⊗k−p⊗b; y=S·r`，参数传 `NULL` 即跳过，覆盖 RWKV-7 与 DeltaNet
@@ -29,7 +42,8 @@
   `locate()` 载入前比对；源码改过但没重编时不再静默命中旧库，直接回退源码编译
   （开发中真实踩到：`sn_mat_scan` 已编入源码却报 `AttributeError`）。
 - 比对内容哈希而非 mtime——pip 解包会把源码 mtime 刷成解包时刻，按时间判会恒判过期。
-  隔离安装实测七库全命中、`prebuilt_stale()` 为 False。库数由 §DeltaNet 增至 7。
+  隔离安装实测全库命中、`prebuilt_stale()` 为 False。库数由 DeltaNet / Mamba-2
+  两个整模型库增至 8。
 - 契约测试 `tests/test_native_prebuilt.py`（7 项）。
 
 ### 构建期的两个 Windows 缺陷
