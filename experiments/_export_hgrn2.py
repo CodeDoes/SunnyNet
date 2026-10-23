@@ -15,6 +15,12 @@
 无输出门 (改整体 RMSNorm), 逐层学习下界 lb。
 矩阵保持 HF 的 (out,in) 行主序; 权重源是 bf16, 统一转 fp32 落盘。
 
+--int4 时 GEMV 矩阵走分组 INT4 (quant.c, block 64), 每个矩阵前置 int32 标签
+(1=INT4, 0=fp32) 并换用 Q4 magic; 向量与嵌入表不量化 (嵌入是查表不是乘加)。
+敏感矩阵可用 --keep-f32=fproj,head,qproj,oproj,mlp 单独保 fp32:
+  fproj 决定 decay g=logsigmoid(f), 误差经 exp 放大后再累积进状态;
+  head  直接决定 argmax。两种 blob 的名字与 magic 都不同, 互不影响。
+
 权重 2.7GB (bf16), 转 fp32 是 5.4GB, 本机空闲内存不足以整份驻留,
 故逐张量读转写, 峰值只占单张 (最大 32000x2048 = 262MB)。
 """
@@ -31,15 +37,29 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-MAGIC = 0x32474853   # "SHG2"
+MAGIC = 0x32474853       # "SHG2" fp32
+MAGIC_Q4 = 0x51474853    # "SHGQ" INT4 带标签
 VERSION = 1
+BLOCK = 64
 
 
 def main():
-    src = sys.argv[1] if len(sys.argv) > 1 else "models/hgrn2-1.3B-100B"
-    dst = sys.argv[2] if len(sys.argv) > 2 else src + "/hgrn2.c.bin"
+    argv = [a for a in sys.argv[1:] if not a.startswith("--")]
+    use_int4 = "--int4" in sys.argv
+    keep = set()
+    for a in sys.argv[1:]:
+        if a.startswith("--keep-f32"):
+            keep |= {s.strip() for s in a.split("=", 1)[1].split(",") if s.strip()}
+    src = argv[0] if argv else "models/hgrn2-1.3B-100B"
+    if len(argv) > 1:
+        dst = argv[1]
+    else:
+        tag = ("-" + "-".join(sorted(keep))) if keep else ""
+        dst = src + ("/hgrn2.q4%s.bin" % tag if use_int4 else "/hgrn2.c.bin")
     src_p = Path(src)
     out_p = Path(dst)
+
+    from sunnynet.runtime import quant as Q
 
     import torch
     from safetensors import safe_open
@@ -103,33 +123,57 @@ def main():
             raw(k).to(torch.float32).numpy().reshape(-1), dtype=np.float32)
 
     out_p.parent.mkdir(parents=True, exist_ok=True)
+    nmats = [0]
     with open(out_p, "wb") as fh:
-        fh.write(struct.pack("<8i4f5i", MAGIC, VERSION, L, D, NH, HK, HV, 0,
+        fh.write(struct.pack("<8i4f5i", MAGIC if not use_int4 else MAGIC_Q4,
+                             VERSION, L, D, NH, HK, HV, 0,
                              float(eps), float(scale), 0.0, float(use_lb),
                              vocab, F, int(tied), 0, 0))
+
+        def put_vec(arr):
+            fh.write(arr.tobytes())
+
+        def put_mat(arr, n_out, n_in, kind):
+            """GEMV 矩阵. fp32: 直接落盘; INT4: 前置标签, 量化后 (out,in)。"""
+            if not use_int4 or kind in keep:
+                if use_int4:
+                    fh.write(struct.pack("<i", 0))
+                fh.write(arr.tobytes())
+                return
+            if n_in % BLOCK:
+                fh.write(struct.pack("<i", 0))
+                fh.write(arr.tobytes())
+                return
+            q, s = Q.quant_i4(arr.reshape(n_out, n_in), BLOCK)
+            fh.write(struct.pack("<i", 1))
+            fh.write(q.tobytes() + s.astype(np.float32).tobytes())
+            nmats[0] += 1
+
         for l in range(L):
-            # 顺序必须与 hgrn2.c 的 take_f32 序列逐项对应
-            fh.write((lb_all[l] if lb_all is not None
-                      else np.zeros(D, np.float32)).tobytes())
-            fh.write(tx("attn_norm.weight", l).tobytes())
-            for m in ("attn.q_proj.weight", "attn.f_proj.weight",
-                      "attn.i_proj.weight", "attn.o_proj.weight"):
-                fh.write(tx(m, l).tobytes())
-            for m in ("attn.g_norm.weight", "mlp_norm.weight"):
-                fh.write(tx(m, l).tobytes())
-            for m in ("mlp.gate_proj.weight", "mlp.up_proj.weight",
-                      "mlp.down_proj.weight"):
-                fh.write(tx(m, l).tobytes())
-        fh.write(tx("model.embeddings.weight").tobytes())
-        fh.write(tx("model.norm.weight").tobytes())
+            # 顺序必须与 hgrn2.c 的加载序列逐项对应
+            put_vec(lb_all[l] if lb_all is not None
+                    else np.zeros(D, np.float32))
+            put_vec(tx("attn_norm.weight", l))
+            put_mat(tx("attn.q_proj.weight", l), KD, D, "qproj")
+            put_mat(tx("attn.f_proj.weight", l), KD, D, "fproj")
+            put_mat(tx("attn.i_proj.weight", l), VD, D, "iproj")
+            put_mat(tx("attn.o_proj.weight", l), D, VD, "oproj")
+            put_vec(tx("attn.g_norm.weight", l))
+            put_vec(tx("mlp_norm.weight", l))
+            put_mat(tx("mlp.gate_proj.weight", l), F, D, "mlp")
+            put_mat(tx("mlp.up_proj.weight", l), F, D, "mlp")
+            put_mat(tx("mlp.down_proj.weight", l), D, F, "mlp")
+        put_vec(tx("model.embeddings.weight"))
+        put_vec(tx("model.norm.weight"))
         if not tied:
-            fh.write(tx("lm_head.weight").tobytes())
+            put_mat(tx("lm_head.weight"), vocab, D, "head")
 
     n_param = 4 * L * D * D + 3 * L * F * D + 2 * vocab * D + 4 * L * D
     print(f"L={L} D={D} NH={NH} HK={HK} HV={HV} KD={KD} VD={VD} F={F} "
-          f"vocab={vocab} tied={tied} use_lb={use_lb}")
+          f"vocab={vocab} tied={tied} use_lb={use_lb} int4={use_int4} "
+          f"keep={sorted(keep)}")
     print(f"参数约 {n_param/1e6:.1f}M -> {out_p} "
-          f"({out_p.stat().st_size/1e6:.1f} MB)")
+          f"({out_p.stat().st_size/1e6:.1f} MB) int4_mats={nmats[0]}")
 
 
 if __name__ == "__main__":

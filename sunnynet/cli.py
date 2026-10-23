@@ -271,6 +271,8 @@ def _dn_vocab(blob: str, hf_dir: str) -> int:
         return int(struct.unpack("<8i4f5i", head[:68])[12])
     if magic == 0x32474853:                       # HGRN2: 同 GLA 头部布局
         return int(struct.unpack("<8i4f5i", head[:68])[12])
+    if magic == 0x51474853:                       # HGRN2 INT4: 头部布局相同
+        return int(struct.unpack("<8i4f5i", head[:68])[12])
     raise SystemExit(f"不是 C 内核 blob (magic {magic:#x}): {blob}")
 
 

@@ -1,5 +1,6 @@
 /* SunnyNet Runtime: HGRN2 整模型单步解码 (AVX2/FMA). */
 #include "hgrn2.h"
+#include "quant.h"
 
 #include <immintrin.h>
 #include <math.h>
@@ -71,29 +72,39 @@ static void sn_map_close(SnMap* m) {
 void sn_hg_set_threads(int n) { if (n > 0) omp_set_num_threads(n); }
 int sn_hg_get_threads(void) { return omp_get_max_threads(); }
 
-#define SN_HG_MAGIC 0x32474853   /* "SHG2" */
+#define SN_HG_MAGIC 0x32474853   /* "SHG2" 纯 fp32 */
+#define SN_HG_MAGIC_Q4 0x51474853 /* "SHGQ" 带 INT4 标签 */
 #define SN_HG_VERSION 1
+#define SN_HG_BLOCK SN_I4_BLOCK
 
 struct SnHGRN2;
+
+/* GEMV 矩阵. fp32 时 w 有效; INT4 时 q/scale 有效 (in 按 block 分组). */
+typedef struct {
+    const float* w;
+    const unsigned char* q;
+    const float* scale;
+    int is_q4, in, out;
+} HGW;
 
 typedef struct SnLayer {
     int D, NH, HK, HV, KD, VD, F, idx;
     float eps, scale;
     const float *lb;                  /* lower bound (D,) */
     const float *an, *mn;             /* attn_norm / mlp_norm (D,) */
-    const float *qp, *fp, *ip, *op;   /* (out,in) 行主序 */
+    HGW qp, fp, ip, op;               /* 投影 (out,in) */
     const float *gn;                  /* g_norm (D,) */
-    const float *mgp, *mup, *mdp;     /* MLP: (F,D) (F,D) (D,F) */
+    HGW mgp, mup, mdp;                /* MLP: (F,D) (F,D) (D,F) */
     float* S;                         /* (NH, HK, HV) */
     struct SnHGRN2* m;
 } SnLayer;
 
 struct SnHGRN2 {
-    int D, NH, HK, HV, KD, VD, F, L, vocab, tied_head, use_lb;
+    int D, NH, HK, HV, KD, VD, F, L, vocab, tied_head, use_lb, is_q4;
     float eps, scale;
     const float* embed;
     const float* ln_f;
-    const float* head;
+    HGW head;
     SnMap map;
     SnLayer* layers;
     float* x;
@@ -126,6 +137,14 @@ static void gemv(float* y, const float* x, const float* W, int in, int out) {
         for (; i < in; ++i) s += row[i] * x[i];
         y[j] = s;
     }
+}
+
+/* 按 HGW 的存储标志分发: INT4 走 quant.c 的 maddubs 路径。 */
+static inline void gemv_w(float* y, const float* x, const HGW* W) {
+    if (W->is_q4)
+        sn_gemv_i4(y, x, W->q, W->scale, W->in, W->out, SN_HG_BLOCK);
+    else
+        gemv(y, x, W->w, W->in, W->out);
 }
 
 static void rms_norm(float* y, const float* x, const float* g, int n, float eps) {
@@ -196,6 +215,34 @@ static const float* take_f32(Cur* c, size_t n) {
     return r;
 }
 
+/* 带标签的 GEMV 矩阵. 标签 1: INT4 载荷 = q(out,in/2 字节) + scale(out,in/block);
+ * 标签 0: fp32 (out,in). 仅 Q4 magic 的文件有标签, fp32 文件仍是无标签的裸流。 */
+static void take_mat(Cur* c, HGW* W, int in, int out, int tagged) {
+    W->in = in;
+    W->out = out;
+    W->w = NULL;
+    W->q = NULL;
+    W->scale = NULL;
+    W->is_q4 = 0;
+    int tag = 0;
+    if (tagged) {
+        memcpy(&tag, c->p, sizeof(int));
+        c->p += sizeof(int);
+    }
+    if (tag == 1) {
+        const size_t qb = (size_t)out * (size_t)(in / 2);
+        const size_t sb = (size_t)out * (size_t)(in / SN_HG_BLOCK) * sizeof(float);
+        W->is_q4 = 1;
+        W->q = c->p;
+        c->p += qb;
+        W->scale = (const float*)c->p;
+        c->p += sb;
+    } else {
+        W->w = (const float*)c->p;
+        c->p += (size_t)in * out * sizeof(float);
+    }
+}
+
 static int rd_i32(FILE* f, int32_t* o, int n) {
     return (int)fread(o, sizeof(int32_t), (size_t)n, f) == n;
 }
@@ -204,10 +251,13 @@ SnHGRN2* sn_hg_load(const char* path) {
     FILE* f = sn_fopen(path, "rb");
     if (!f) return NULL;
     int32_t h[8];
-    if (!rd_i32(f, h, 8) || h[0] != SN_HG_MAGIC || h[1] != SN_HG_VERSION) {
+    if (!rd_i32(f, h, 8)
+        || (h[0] != SN_HG_MAGIC && h[0] != SN_HG_MAGIC_Q4)
+        || h[1] != SN_HG_VERSION) {
         fclose(f);
         return NULL;
     }
+    const int tagged = (h[0] == SN_HG_MAGIC_Q4);
     const int L = h[2], D = h[3], NH = h[4], HK = h[5], HV = h[6];
     float hf[4];
     if (fread(hf, sizeof(float), 4, f) != 4) { fclose(f); return NULL; }
@@ -227,6 +277,7 @@ SnHGRN2* sn_hg_load(const char* path) {
     m->KD = NH * HK; m->VD = NH * HV; m->F = meta[1];
     m->vocab = meta[0]; m->tied_head = meta[2];
     m->eps = hf[0]; m->scale = hf[1]; m->use_lb = (hf[3] != 0.0f);
+    m->is_q4 = tagged;
 
     Cur c = { buf + 68 };   /* 8i + 4f + 5i 头部, 与导出器 _export_hgrn2.py 同步 */
     for (int l = 0; l < L; ++l) {
@@ -239,19 +290,24 @@ SnHGRN2* sn_hg_load(const char* path) {
         /* 顺序由导出器 _export_hgrn2.py 决定, 两处必须同步改 */
         A->lb = take_f32(&c, D);
         A->an = take_f32(&c, D);
-        A->qp = take_f32(&c, (size_t)D * D);
-        A->fp = take_f32(&c, (size_t)D * D);
-        A->ip = take_f32(&c, (size_t)D * D);
-        A->op = take_f32(&c, (size_t)D * D);
+        take_mat(&c, &A->qp, D, m->KD, tagged);
+        take_mat(&c, &A->fp, D, m->KD, tagged);
+        take_mat(&c, &A->ip, D, m->VD, tagged);
+        take_mat(&c, &A->op, m->VD, D, tagged);
         A->gn = take_f32(&c, D);
         A->mn = take_f32(&c, D);
-        A->mgp = take_f32(&c, (size_t)m->F * D);
-        A->mup = take_f32(&c, (size_t)m->F * D);
-        A->mdp = take_f32(&c, (size_t)D * m->F);
+        take_mat(&c, &A->mgp, D, m->F, tagged);
+        take_mat(&c, &A->mup, D, m->F, tagged);
+        take_mat(&c, &A->mdp, m->F, D, tagged);
     }
     m->embed = take_f32(&c, (size_t)m->vocab * D);
     m->ln_f = take_f32(&c, D);
-    m->head = m->tied_head ? NULL : take_f32(&c, (size_t)m->vocab * D);
+    if (!m->tied_head)
+        take_mat(&c, &m->head, D, m->vocab, tagged);
+    else {
+        m->head.w = NULL; m->head.q = NULL; m->head.scale = NULL;
+        m->head.is_q4 = 0; m->head.in = D; m->head.out = m->vocab;
+    }
 
     for (int l = 0; l < L; ++l) {
         SnLayer* A = &m->layers[l];
@@ -313,12 +369,12 @@ static void hg_layer(SnLayer* A, float* x) {
     rms_norm(h, x, A->an, D, A->eps);
     probe_dump(m, 0, h, D);
 
-    gemv(q, h, A->qp, D, KD);
+    gemv_w(q, h, &A->qp);
     for (int i = 0; i < KD; ++i) q[i] = silu(q[i]);   /* HGRN2 对 q 过 silu */
     probe_dump(m, 1, q, KD);
 
-    gemv(f, h, A->fp, D, KD);
-    gemv(v, h, A->ip, D, VD);
+    gemv_w(f, h, &A->fp);
+    gemv_w(v, h, &A->ip);
     probe_dump(m, 2, f, KD);
     probe_dump(m, 6, v, VD);
 
@@ -352,15 +408,15 @@ static void hg_layer(SnLayer* A, float* x) {
     /* 无输出门: 在 value 维整体 RMSNorm 后接 o_proj */
     rms_norm(o, o, A->gn, VD, A->eps);
     probe_dump(m, 8, o, VD);
-    gemv(h, o, A->op, VD, D);
+    gemv_w(h, o, &A->op);
     probe_dump(m, 9, h, D);
     for (int i = 0; i < D; ++i) x[i] += h[i];
 
     rms_norm(h, x, A->mn, D, A->eps);
-    gemv(mg, h, A->mgp, D, F);
-    gemv(mu, h, A->mup, D, F);
+    gemv_w(mg, h, &A->mgp);
+    gemv_w(mu, h, &A->mup);
     for (int i = 0; i < F; ++i) mg[i] = silu(mg[i]) * mu[i];
-    gemv(h, mg, A->mdp, F, D);
+    gemv_w(h, mg, &A->mdp);
     for (int i = 0; i < D; ++i) x[i] += h[i];
 }
 
@@ -370,7 +426,10 @@ static void hg_forward(SnHGRN2* m, int token, float* logits) {
     memcpy(x, m->embed + (size_t)token * D, (size_t)D * sizeof(float));
     for (int l = 0; l < m->L; ++l) hg_layer(&m->layers[l], x);
     rms_norm(x, x, m->ln_f, D, m->eps);
-    gemv(logits, x, m->head ? m->head : m->embed, D, m->vocab);
+    if (m->head.w || m->head.is_q4)
+        gemv_w(logits, x, &m->head);
+    else
+        gemv(logits, x, m->embed, D, m->vocab);   /* tied: 复用嵌入表 */
 }
 
 void sn_hg_step(SnHGRN2* m, int token, float* logits) {

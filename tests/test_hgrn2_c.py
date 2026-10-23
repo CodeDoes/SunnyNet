@@ -16,10 +16,15 @@ from sunnynet.runtime.hgrn2_c import SnHGRN2, hgrn2_available
 
 MDIR = os.environ.get("SUNNY_HGRN2", "F:/sunnyclaw-data/models/hgrn2-1.3B-100B")
 BLOB = Path(MDIR) / "hgrn2.c.bin"
+BLOB4 = Path(MDIR) / "hgrn2.q4.bin"
 
 pytestmark = pytest.mark.skipif(
     not hgrn2_available() or not BLOB.is_file(),
     reason="无 C 编译器/预编译库, 或缺少权重 blob")
+
+q4mark = pytest.mark.skipif(
+    not hgrn2_available() or not BLOB4.is_file(),
+    reason="缺少 INT4 blob (hgrn2.q4.bin)")
 
 
 @pytest.fixture(scope="module")
@@ -101,3 +106,39 @@ def test_lower_bound_is_applied_from_layer1(m):
     # numpy 侧第 0 层 lb 已是 0, 这里只需确认 C 侧没误加 lb 混合
     assert not np.allclose(ref, 0.0)
     assert m0.use_lower_bound
+
+
+@q4mark
+def test_int4_loads_with_q4_magic(m):
+    """Q4 blob 走带标签的解析路径, 头部的 vocab/维度必须与 fp32 一致。"""
+    h = SnHGRN2(BLOB4, m.vocab)
+    assert h.vocab == m.vocab
+    assert len(h.logits()) == m.vocab
+
+
+@q4mark
+def test_int4_differs_from_fp32_but_stays_finite(m):
+    """量化只改数值不改形状; 两层 logits 必须同为有限值且逐位不同。
+    相对误差上限 0.6: 4-bit 分组量化的理论相对误差约 0.10 (scale=amax/7),
+    多步递推累积后实测 0.24–0.30; 这里只挡解析/索引错位的离谱值。"""
+    h32 = SnHGRN2(BLOB, m.vocab)
+    h4 = SnHGRN2(BLOB4, m.vocab)
+    ids = list(range(5, 15))
+    a = np.stack([np.asarray(h32.step(t)) for t in ids])
+    b = np.stack([np.asarray(h4.step(t)) for t in ids])
+    assert np.isfinite(b).all()
+    d = float(np.abs(a - b).max()) / max(float(np.abs(a).max()), 1e-9)
+    assert 0.0 < d < 0.6, f"相对 max|diff|={d:.3e}"
+    # 高置信度位置的 top-1 应大体一致, 量化不该让 logits 面目全非
+    agree = sum(int(a[i].argmax() == b[i].argmax()) for i in range(len(ids)))
+    assert agree >= len(ids) // 2, f"argmax 一致性 {agree}/{len(ids)}"
+
+
+@q4mark
+def test_int4_repeated_run_is_bit_stable(m):
+    h = SnHGRN2(BLOB4, m.vocab)
+    ids = list(range(5, 15))
+    a = np.stack([np.asarray(h.step(t)) for t in ids])
+    h.reset()
+    b = np.stack([np.asarray(h.step(t)) for t in ids])
+    assert float(np.abs(a - b).max()) == 0.0

@@ -21,7 +21,8 @@ def hgrn2_available() -> bool:
 
 
 def _link_cmd(gcc: str, dst) -> list[str]:
-    return [gcc] + compile_flags() + [str(HERE / "hgrn2.c"), "-o", str(dst)]
+    return [gcc] + compile_flags() + [
+        str(HERE / "hgrn2.c"), str(HERE / "quant.c"), "-o", str(dst)]
 
 
 def _compile(gcc: str) -> None:
@@ -37,7 +38,7 @@ def _needs_rebuild() -> bool:
         return True
     t = DLL.stat().st_mtime
     return any(s.stat().st_mtime > t
-               for s in (HERE / "hgrn2.c", HERE / "hgrn2.h"))
+               for s in (HERE / "hgrn2.c", HERE / "hgrn2.h", HERE / "quant.c"))
 
 
 _lib = None

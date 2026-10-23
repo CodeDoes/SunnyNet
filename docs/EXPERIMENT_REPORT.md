@@ -2968,6 +2968,47 @@ softmax 在**层维**（24）上做，第 0 层恒为 0；层内只有 `i > 0` �
 numpy 参考同样改走 blob 的 `np.memmap`（与 C 读同一份同布局数据，对照更严格），
 HF 侧则逐张量惰性转换；两条路径都不再需要 5.46 GB 常驻。
 
+**（13）HGRN2 的 INT4 权重路径**（`--int4` 导出 + 内核按标签分发 `sn_gemv_i4`）
+
+上表的 1.29× 说明 fp32 的 HGRN2 已无余量可挖——**权重 5.46 GB 时任何实现都只能等内存读完**。
+唯一剩下的杠杆是**减少读取字节**，故把 RWKV-7 上已验证的分组 INT4 GEMV（`runtime/quant.c`）
+接到 HGRN2：GEMV 矩阵按 `block=64` 对称量化，每个矩阵前置一个 `int32` 格式标签
+（1=INT4，0=fp32），blob magic 换成 `SHGQ`（`0x51474853`）。向量与嵌入表不量化
+（嵌入是查表不是乘加）。**fp32 blob 与其验证链完全不动**，两种 blob 文件名与 magic 都不同。
+
+| 项 | fp32 | INT4 | 比 |
+|---|---|---|---|
+| blob 体积 | 5457.6 MB | **993.4 MB** | **5.49×** |
+| 单步 1 线程 | 382.00 ms | 158.82 ms | 2.41× |
+| 单步 4 线程 | 221.42 ms | 88.42 ms | 2.50× |
+| 单步 8 线程 | 203.33 ms | **72.19 ms** | **2.82×** |
+| 理论下限（顺序读 18.63 GB/s） | 293.2 ms | 53.3 ms | — |
+
+CLI 端到端（`--blob .../hgrn2.q4.bin`，backend 仍标 `hf/hgrn2/c`）：
+`The capital of France is Paris.`，**79.86 ms/tok**（fp32 同 prompt 为 222.05 ms/tok，**2.78×**）。
+
+**精度**：分组 INT4 取 `scale = amax / 7`（覆盖 `[0,15]` 共 7 个正向档，`q=0` 对应 −8），
+理论相对误差 `1/(2·7) ≈ 0.071`，单矩阵实测 **0.097–0.168**（cos 0.993）——
+与 RWKV-7 的 ~0.11 同级。整模型逐 token 相对误差中位 **0.242**（合成 token，36 步），
+逐层探针显示 **layer 0 单步即 0.189、层间不放大**，故差异全部来自量化本身而非状态累积。
+
+质量按**真实文本贪心续写**看（`_hgrn2_int4_quality.py`，与 RWKV-7 同口径）：
+
+| prompt | fp32 | INT4 |
+|---|---|---|
+| The capital of France is | `Paris.` | `Paris.` |
+| Water is made of hydrogen and | `oxygen.` | `oxygen.` |
+| The theory of relativity was proposed by | `Albert Einstein in 1905.` | `Albert Einstein in 1915.` |
+| The sun rises in the east and sets in the | `west.` | `west.` |
+
+首词与语义全部保持，逐 token 一致率 4–9/20；退化表现为**重复倾向**（`Hydrogen is a very
+light element.` → 后半开始循环）与**事实细节错**（1905→1915）。**不声称质量无损**——
+4 bit 欲压质量须配校准，而敏感矩阵保 fp32 的尝试（`fproj+head` 保 fp32）实测无改善
+（argmax 仍 20/36），说明误差是多矩阵分布式而非集中在某一类。
+
+测试：`tests/test_hgrn2_c.py` 增 3 项（Q4 magic 加载、与 fp32 的有限/有差异/argmax 过半、
+重复运行逐位稳定），全量 **186 passed / 8 skipped**（原 183 / 8，无回归）。
+
 ### 24.13 预编译原生库
 
 前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`，
@@ -3282,6 +3323,16 @@ python -X utf8 -m pytest tests/test_mat_scan.py -v
 python -X utf8 -m pytest tests/test_deltanet_c.py -v
 python -X utf8 -m pytest tests/test_mamba2_c.py -v
 python -X utf8 -m pytest tests/test_gla_c.py -v
+python -X utf8 experiments/_export_hgrn2.py MDIR MDIR/hgrn2.c.bin     # §24.12 HGRN2 fp32 blob
+python -X utf8 experiments/_hgrn2_check.py                   # §24.12 HGRN2 numpy 一致性
+python -X utf8 experiments/_hgrn2_c_equiv.py                 # §24.12 HGRN2 C vs numpy
+python -X utf8 experiments/_hgrn2_c_bench.py                 # §24.12 HGRN2 C 速度
+python -X utf8 experiments/_export_hgrn2.py --int4 MDIR MDIR/hgrn2.q4.bin  # §24.12(13) INT4 blob
+python -X utf8 experiments/_hgrn2_int4_equiv.py              # §24.12(13) INT4 vs fp32/numpy
+python -X utf8 experiments/_hgrn2_int4_probe.py              # §24.12(13) 逐层误差定位
+python -X utf8 experiments/_hgrn2_int4_sweep.py              # §24.12(13) 变体对照
+python -X utf8 experiments/_hgrn2_int4_quality.py            # §24.12(13) 真实文本质量
+python -X utf8 -m pytest tests/test_hgrn2_c.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。
