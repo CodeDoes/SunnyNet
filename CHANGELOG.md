@@ -27,6 +27,19 @@
   1.10× 同样是带宽原因：权重 0.52 GB 仅为 DeltaNet 1.37 GB 的 38%，
   两条路径都未贴到 18.63 GB/s 上限。`tests/test_mamba2_c.py` 7 项。
 
+### GLA 整模型 C 内核
+- `runtime/gla.c`：整个前向在 C（低秩衰减投影 + 元素级状态递推 + 输出门 +
+  SwiGLU MLP），权重由 `experiments/_export_gla.py` 导成 1.37 GB fp32 blob（源 bf16）。
+  Python 侧 `sunnynet.runtime.gla_c.SnGLA`，CLI `--hf-arch gla --blob`。
+- 对 numpy 参考路径 36 token：logits max|diff| **1.431e-05**、相对 **1.081e-06**、
+  argmax **36/36**、重复与 reset 逐位 0.0、prefill 与逐步 0.0。
+- 速度单步 74.92 → **74.15 ms/token（1.01×，4/5 逐轮占优）**。权重 1.37 GB 与 DeltaNet
+  同量级，理论下限 `1.37 GB ÷ 18.63 GB/s ≈ 73.5 ms`，两条路径的中位读数都已贴到这条线
+  ⇒ C 化无余量可拿。三个架构合并印证：**收益由「权重字节数 / 可用带宽」决定**。
+- 新增层内阶段探针 `sn_gla_probe`（10 个 stage），定位到 `gla_scan` 里所有 head 都读
+  `v` 的第 0 段而非各自 value 段（单步 readout 差 96%，各投影却全对）。
+  `head_k_dim ≠ head_v_dim` 时该错**不越界**，只会静默算错。`tests/test_gla_c.py` 8 项。
+
 ### 矩阵值 rank-1 递推内核
 - 新增 `sn_mat_scan`（`runtime/recur.c`，声明见 `recur.h`）：统一形式
   `p=S·u; S=S⊙w+v⊗k−p⊗b; y=S·r`，参数传 `NULL` 即跳过，覆盖 RWKV-7 与 DeltaNet
@@ -42,8 +55,8 @@
   `locate()` 载入前比对；源码改过但没重编时不再静默命中旧库，直接回退源码编译
   （开发中真实踩到：`sn_mat_scan` 已编入源码却报 `AttributeError`）。
 - 比对内容哈希而非 mtime——pip 解包会把源码 mtime 刷成解包时刻，按时间判会恒判过期。
-  隔离安装实测全库命中、`prebuilt_stale()` 为 False。库数由 DeltaNet / Mamba-2
-  两个整模型库增至 8。
+  隔离安装实测全库命中、`prebuilt_stale()` 为 False。库数由三个整模型库
+  （DeltaNet / Mamba-2 / GLA）增至 9。
 - 契约测试 `tests/test_native_prebuilt.py`（7 项）。
 
 ### 构建期的两个 Windows 缺陷

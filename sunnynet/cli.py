@@ -199,12 +199,15 @@ def _dn_vocab(blob: str, hf_dir: str) -> int:
     """从 blob 头部读 vocab (避免为拿一个数加载整个 HF 权重)。"""
     import struct
     with open(blob, "rb") as f:
-        h = struct.unpack("<8if3i", f.read(8 * 4 + 4 + 12))
-    if h[0] == 0x4E4E4444:                 # DeltaNet
-        return int(h[9])
-    if h[0] == 0x324E4D53:                 # Mamba-2
-        return int(h[9])
-    raise SystemExit(f"不是 C 内核 blob (magic {h[0]:#x}): {blob}")
+        head = f.read(72)
+    if len(head) < 48:
+        raise SystemExit(f"blob 头部不完整: {blob}")
+    magic = struct.unpack("<i", head[:4])[0]
+    if magic in (0x4E4E4444, 0x324E4D53):        # DeltaNet / Mamba-2
+        return int(struct.unpack("<8if3i", head[:48])[9])
+    if magic == 0x414C4753:                       # GLA: 8 int + 4 float 后是 meta
+        return int(struct.unpack("<8i4f5i", head[:68])[12])
+    raise SystemExit(f"不是 C 内核 blob (magic {magic:#x}): {blob}")
 
 
 class _CAdapter:
@@ -260,6 +263,8 @@ def _main_hf(args) -> int:
         c_arch = "deltanet"
     elif args.blob and args.hf_arch == "mamba2":
         c_arch = "mamba2"
+    elif args.blob and args.hf_arch == "gla":
+        c_arch = "gla"
     if c_arch == "deltanet":
         # 整模型 C 内核: 前向全在 C, 与 numpy 参考路径逐 token 一致
         from .runtime.deltanet_c import SnDeltaNet
@@ -269,6 +274,10 @@ def _main_hf(args) -> int:
         from .runtime.mamba2_c import SnMamba2
         m = _CAdapter(SnMamba2(args.blob, _dn_vocab(args.blob, args.hf_dir),
                                threads=args.threads), args.hf_dir)
+    elif c_arch == "gla":
+        from .runtime.gla_c import SnGLA
+        m = _CAdapter(SnGLA(args.blob, _dn_vocab(args.blob, args.hf_dir),
+                            threads=args.threads), args.hf_dir)
     else:
         m = Model(args.hf_dir)
     load_s = time.perf_counter() - t0
@@ -364,7 +373,7 @@ def main(argv=None):
                     help="--gguf 时的执行后端; c = C 内核整模型单步")
     ap.add_argument("--blob", default=None,
                     help="C 内核权重 blob: RWKV-7 的 --gguf-backend c 用它, "
-                         "或 --hf-arch deltanet|mamba2 时指向对应的 .c.bin "
+                         "或 --hf-arch deltanet|mamba2|gla 时指向对应的 .c.bin "
                          "(整模型前向在 C)")
     ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")

@@ -2850,13 +2850,67 @@ It is the capital of the Republic of France
 `reset`**，否则第二次起读到的是累积态。此坑在 DeltaNet 侧同样存在（`sn_dn_dbg`），
 首次写探针时踩到。
 
+**（11）GLA 整模型进 C**（`runtime/gla.c`）
+
+GLA 与 Mamba-2 同属元素级递推（§24.12 已确认衰减只作用在 key 维、可分解为按行缩放），
+但层结构更复杂：多一路低秩衰减投影（`gk_proj` 16 维）、输出门（`g_proj` + 逐 head
+RMSNorm）、SwiGLU MLP。整模型前向搬进 `runtime/gla.c`，权重由
+`experiments/_export_gla.py` 导成 1.37 GB fp32 blob（源是 bf16）。
+
+逐 token 对照 numpy 参考（`experiments/_gla_c_equiv.py`，36 token）：
+
+| 检查 | 结果 |
+|---|---|
+| logits max\|diff\| | **1.431e-05** |
+| 相对误差 | **1.081e-06** |
+| argmax 一致 | **36/36** |
+| 重复运行 / reset 后重跑 | 逐位 **0.0** |
+| prefill vs 逐步 | **0.0** |
+
+速度（`experiments/_gla_c_bench.py`，每格独立子进程 × 5 轮交错）：
+
+| 轮 | numpy ms | C ms | C 倍数 |
+|---|---|---|---|
+| 0 | 77.65 | 74.15 | 1.05× |
+| 1 | 74.92 | 75.23 | 1.00× |
+| 2 | 75.47 | 70.69 | 1.07× |
+| 3 | 72.83 | 69.95 | 1.04× |
+| 4 | 74.89 | 74.44 | 1.01× |
+| 中位 | 74.92 | 74.15 | **1.01×（4/5 逐轮占优）** |
+
+**1.01× 是带宽墙的极端情形**：GLA 权重 1.37 GB 与 DeltaNet 相同量级，理论下限
+`1.37 GB ÷ 18.63 GB/s ≈ 73.5 ms`，numpy 与 C 的实测中位（74.92 / 74.15 ms）**都已贴到
+这条线上**，C 化拿不到任何余量。⇒ 与 DeltaNet 的 1.10×、Mamba-2 的 1.37× 合并看，
+三个架构共同印证同一规律：**整模型解码的 C 化收益由「权重字节数 / 可用带宽」决定**。
+权重 1.37 GB 时收益趋近于零，0.52 GB 时才有 1.37×。
+
+CLI 端到端（`--hf-arch gla --blob`，backend 标 `hf/gla/c`）：
+
+```
+<s> The capital of France is the city of Paris.
+The city of Paris is the capital of France.
+[load 569.2 ms; prefill 6 tok 498.5 ms; decode 20 tok 94.91 ms/tok]
+```
+
+**（12）GLA 开发中定位的真实缺陷**：单步 readout 差 **96%** 而各投影（`attn_norm` /
+`q` / `k` / `v` / `exp(gk)` / `g_proj`）全部正确到 1e-7。根因是 `gla_scan` 里每个 head
+都读了 `v` 的**第 0 段**（`v + j`）而非该 head 自己的 value 段（`v + h·HV + j`），
+于是所有 head 共用同一 value 向量。
+
+定位手段是**层内阶段探针** `sn_gla_probe`（暴露 10 个阶段的中间量：`attn_norm` / `q` /
+`k` / `v` / `exp(gk)` / `g_proj` / readout / 逐 head RMSNorm 后 / 门后 / `o_proj`），
+逐阶段与参考对表——**只看层输出定位不到**，因为层输出是多个正确项与一个错误项的和。
+
+`head_k_dim ≠ head_v_dim`（128 vs 256）时这种索引错**不会报越界**：`v` 总量是
+`NH·HV = 1024`，用 `h·HV` 与用 0 都在界内，只会静默算成别的式子。
+
 定位手段：在 C 侧加 `sn_dn_dbg` 转储逐层中间量，与 numpy 参考**逐项**对表。
 五处缺陷里有四处是纯数值错位（不崩、不报错），只能靠中间量比对揪出。
 
 ### 24.13 预编译原生库
 
 前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`，
-§24.12 依次加入 DeltaNet 与 Mamba-2 整模型库后为 **8 个**）
+§24.12 依次加入 DeltaNet / Mamba-2 / GLA 三个整模型库后为 **9 个**）
 原本都在**首次调用时用本机 gcc 现编**，因此 `pip install` 之后仍需另装 C 编译器。
 本节把编译挪到 **wheel 构建期**：构建机上编好、产物随包分发，装机后直接加载。
 
@@ -3158,9 +3212,15 @@ python -X utf8 experiments/_export_mamba2.py MDIR MDIR/mamba2.c.bin  # §24.12 �
 python -X utf8 experiments/_mamba2_c_equiv.py                # §24.12 Mamba-2 C vs numpy
 python -X utf8 experiments/_mamba2_layer_probe.py            # §24.12 Mamba-2 逐层对表
 python -X utf8 experiments/_mamba2_c_bench.py 5              # §24.12 Mamba-2 C 速度
+python -X utf8 experiments/_export_gla.py MDIR MDIR/gla.c.bin    # §24.12 导出 C blob
+python -X utf8 experiments/_gla_c_equiv.py                   # §24.12 GLA C vs numpy
+python -X utf8 experiments/_gla_layer_probe.py               # §24.12 GLA 逐层对表
+python -X utf8 experiments/_gla_stage_probe.py 0              # §24.12 GLA 层内阶段对表
+python -X utf8 experiments/_gla_c_bench.py 5                 # §24.12 GLA C 速度
 python -X utf8 -m pytest tests/test_mat_scan.py -v
 python -X utf8 -m pytest tests/test_deltanet_c.py -v
 python -X utf8 -m pytest tests/test_mamba2_c.py -v
+python -X utf8 -m pytest tests/test_gla_c.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。
