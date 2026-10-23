@@ -115,6 +115,16 @@ class SnDeltaNet:
         """只推进状态, 不把 logits 拷成 Python list (计时用)."""
         self._lib.sn_dn_step(self._h, int(token), ctypes.byref(self._logits))
 
+    def step_np(self, token: int):
+        """推进一步并返回 logits 的 numpy 零拷贝视图 (解码循环用, 免 list 转换)."""
+        import numpy as np
+        self._lib.sn_dn_step(self._h, int(token), ctypes.byref(self._logits))
+        return np.frombuffer(self._logits, dtype=np.float32)
+
+    def logits_np(self):
+        import numpy as np
+        return np.frombuffer(self._logits, dtype=np.float32)
+
     def logits(self) -> list[float]:
         return list(self._logits)
 

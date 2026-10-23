@@ -2882,6 +2882,10 @@ RMSNorm）、SwiGLU MLP。整模型前向搬进 `runtime/gla.c`，权重由
 `1.37 GB ÷ 18.63 GB/s ≈ 73.5 ms`，numpy 与 C 的实测中位（74.92 / 74.15 ms）**都已贴到
 这条线上**，C 化拿不到任何余量。⇒ 与 DeltaNet 的 1.10×、Mamba-2 的 1.37× 合并看，
 三个架构共同印证同一规律：**整模型解码的 C 化收益由「权重字节数 / 可用带宽」决定**。
+
+HGRN2（§24.12（12），5.46 GB）把这规律推到极端一端：C 相对 numpy 只有 **1.27×**，
+且单线程 381 ms 已落在单线程顺序读上限（18.63 GB/s）之下、8 线程 205 ms 对应
+26.6 GB/s 亦贴近多线程上限（30.45 GB/s）。**权重 5.46 GB 时，任何实现都只能等内存读完。**
 权重 1.37 GB 时收益趋近于零，0.52 GB 时才有 1.37×。
 
 CLI 端到端（`--hf-arch gla --blob`，backend 标 `hf/gla/c`）：
@@ -2907,10 +2911,67 @@ The city of Paris is the capital of France.
 定位手段：在 C 侧加 `sn_dn_dbg` 转储逐层中间量，与 numpy 参考**逐项**对表。
 五处缺陷里有四处是纯数值错位（不崩、不报错），只能靠中间量比对揪出。
 
+**（12）HGRN2 整模型进 C**（`runtime/hgrn2.c`，`fla-hub/hgrn2-1.3B-100B`）
+
+dim 2048 / 24 层 / 16 head / head_f_dim = head_i_dim = 128 / vocab 32000 /
+244 张量 / 1.36B 参数。该 checkpoint **不在 `transformers` 原生支持列表内**
+（5.20.2 只有 mamba / mamba2 / rwkv / zamba / falcon_mamba），故对照基准是本仓
+独立书写的 numpy 参考（`runtime/hgrn2.py`，显式循环矩阵-向量，不借 einsum）。
+
+与 GLA 的递推同构（论文称 "identical recurrent structure"，HGRN2 复用 GLA 内核），
+四处参数化差异：
+
+| 项 | GLA | HGRN2 |
+|---|---|---|
+| key | `k_proj` 独立投影 | **无 k_proj**，`k = 1 − exp(g)` 由衰减导出 |
+| decay | `gk_proj` 低秩 (16 维) + `logsigmoid` / normalizer | `f_proj` 满秩 2048 + `logaddexp(lb, log1p(−lb) + logsigmoid(f))` |
+| 下界 | `clamp_min` 标量（本 checkpoint 未用） | **逐层学习 `lower_bounds[24, 2048]`** |
+| q / 输出门 | q 直接读出；输出门 `RMSNorm(o)⊙silu(g_proj)` 逐 head | **q 过 silu**；**无输出门**，`o` 在 value 维整体 RMSNorm |
+
+`lb` 在层循环里预算：`softmax(lower_bounds, dim=0).cumsum(0) − softmax(...)[0]`，
+softmax 在**层维**（24）上做，第 0 层恒为 0；层内只有 `i > 0` 参与混合。
+
+对照结果：
+
+| 检查 | 结果 |
+|---|---|
+| 单步 vs 分段续算 | **0.000e+00**（逐位） |
+| 单步 vs 独立 numpy 参考（12 token） | **1.192e-05** |
+| C 内核 vs numpy 参考（逐 token，36 步） | max\|diff\| **3.552e-05**，相对 **2.384e-06** |
+| argmax 一致 | **36/36** |
+| 贪心续写 | `The capital of France is Paris.` |
+| 全量测试 | **183 passed / 8 skipped / exit 0**（无回归，原 175 / 2） |
+
+速度（`experiments/_hgrn2_c_bench.py`，B=1 单序列，numpy 侧预热 2 步后计 8 步中位）：
+
+| 线程 | ms/tok | vs numpy |
+|---|---|---|
+| numpy 参考 | 262.44 | 1.00× |
+| 1 | 382.00 | 0.69× |
+| 4 | 221.42 | 1.19× |
+| 8 | 203.33 | **1.29×** |
+
+权重 5.46 GB fp32。单线程顺序读下限 `5.46 GB ÷ 18.63 GB/s ≈ 292.9 ms`，实测单线程
+382 ms 顺着这条线（纯 GEMV 的单线程顺序读上限即 18.63 GB/s）；8 线程 203 ms 对应
+26.8 GB/s，已贴近 4 线程测到的 30.45 GB/s 多线程上限。**这是「权重越大、C 化收益越小」
+的极端一端**：5.46 GB 的权重任何实现都只能等内存读完，1.29× 即全部可得的余量。
+
+两个开发中定位的真实缺陷：
+
+- **blob 加载用 `fseek(f, 0, SEEK_END)` 探长度会静默失败**。mingw 的 `long` 是 32 位，
+  5.46 GB > 2³¹ 时 `ftell` 溢出，`fseek` 返回非零，加载函数直接返回 NULL 而不报原因。
+  该段代码在改用文件映射后本就多余，直接删除。
+- **5.46 GB 的 fp32 blob 不能 `malloc` + `fread`**。本机物理内存 15.87 GB、空闲 5.79 GB，
+  复制进堆要再占 5.46 GB，叠加导出期的峰值即段错误。改用 `MapViewOfFile` / `mmap`
+  只读映射，由页缓存共享，只有真正读到的页占内存——**这对边缘端是必要条件而非优化**。
+
+numpy 参考同样改走 blob 的 `np.memmap`（与 C 读同一份同布局数据，对照更严格），
+HF 侧则逐张量惰性转换；两条路径都不再需要 5.46 GB 常驻。
+
 ### 24.13 预编译原生库
 
 前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`，
-§24.12 依次加入 DeltaNet / Mamba-2 / GLA 三个整模型库后为 **9 个**）
+§24.12 依次加入 DeltaNet / Mamba-2 / GLA / HGRN2 四个整模型库后为 **10 个**）
 原本都在**首次调用时用本机 gcc 现编**，因此 `pip install` 之后仍需另装 C 编译器。
 本节把编译挪到 **wheel 构建期**：构建机上编好、产物随包分发，装机后直接加载。
 

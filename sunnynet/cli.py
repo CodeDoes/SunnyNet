@@ -195,6 +195,68 @@ def _main_gguf_c(args) -> int:
     return 0
 
 
+def _main_rwkv7_blob(args) -> int:
+    """RWKV-7 blob 直接走 C 内核 (权重来自 GGUF 或 FLA safetensors 导出)。
+
+    分词用 RWKV 官方词表文件 (rwkv_vocab_v20230424.txt), 不依赖 GGUF。
+    """
+    import numpy as np
+    from .runtime.rwkv7_c import SnRWKV7
+    from .runtime.vocab import RWKVVocab
+
+    blob = Path(args.blob)
+    if not blob.exists():
+        raise SystemExit(f"缺少权重 blob: {blob}")
+    vocab_file = Path(args.tokenizer_dir) / "rwkv_vocab_v20230424.txt" \
+        if args.tokenizer_dir else None
+    if vocab_file is None or not vocab_file.exists():
+        alt = Path(args.blob).parent / "rwkv_vocab_v20230424.txt"
+        vocab_file = alt if alt.exists() else None
+
+    t0 = time.perf_counter()
+    tk = RWKVVocab(str(vocab_file)) if vocab_file else None
+    m = SnRWKV7(str(blob), args.vocab or 65536)
+    load_s = time.perf_counter() - t0
+
+    ids = tk.encode(args.prompt) if tk is not None else \
+        [1] + [b + 2 for b in args.prompt.encode("utf-8")]
+    m.reset()
+    logits = None
+    for t in ids:
+        logits = m.step_np(int(t))
+    out = list(ids)
+    step_times = []
+    for _ in range(args.max_new):
+        nxt = (int(np.argmax(logits)) if args.temperature <= 0
+               else _sample_np(logits, args.temperature, args.top_k))
+        out.append(nxt)
+        t0 = time.perf_counter()
+        logits = m.step_np(nxt)
+        step_times.append(time.perf_counter() - t0)
+    text = tk.decode(out) if tk is not None else ""
+    st = {
+        "backend": "rwkv7/c",
+        "load_ms": load_s * 1e3,
+        "prefill_tokens": len(ids),
+        "gen_tokens": len(step_times),
+        "decode_ms_per_token": (sum(step_times) / len(step_times) * 1e3
+                                if step_times else 0.0),
+    }
+    if args.json:
+        print(json.dumps({"prompt": args.prompt, "text": text,
+                          "arch": "rwkv7", "stats": st},
+                         ensure_ascii=False, indent=2))
+    else:
+        sys.stdout.write(text)
+        print()
+        if args.stats:
+            print(f"[rwkv7 blob backend rwkv7/c]")
+            print(f"[load {st['load_ms']:.1f} ms; prefill {st['prefill_tokens']} tok; "
+                  f"decode {st['gen_tokens']} tok "
+                  f"{st['decode_ms_per_token']:.2f} ms/tok]")
+    return 0
+
+
 def _dn_vocab(blob: str, hf_dir: str) -> int:
     """从 blob 头部读 vocab (避免为拿一个数加载整个 HF 权重)。"""
     import struct
@@ -206,6 +268,8 @@ def _dn_vocab(blob: str, hf_dir: str) -> int:
     if magic in (0x4E4E4444, 0x324E4D53):        # DeltaNet / Mamba-2
         return int(struct.unpack("<8if3i", head[:48])[9])
     if magic == 0x414C4753:                       # GLA: 8 int + 4 float 后是 meta
+        return int(struct.unpack("<8i4f5i", head[:68])[12])
+    if magic == 0x32474853:                       # HGRN2: 同 GLA 头部布局
         return int(struct.unpack("<8i4f5i", head[:68])[12])
     raise SystemExit(f"不是 C 内核 blob (magic {magic:#x}): {blob}")
 
@@ -227,6 +291,9 @@ class _CAdapter:
 
     def step(self, token, state=None):
         import numpy as np
+        sn = getattr(self.h, "step_np", None)
+        if sn is not None:
+            return sn(int(token))
         return np.asarray(self.h.step(int(token)), dtype=np.float32)
 
 
@@ -254,6 +321,8 @@ def _main_hf(args) -> int:
         from .runtime.deltanet import DeltaNet as Model
     elif args.hf_arch == "gla":
         from .runtime.gla import GLA as Model
+    elif args.hf_arch == "hgrn2":
+        from .runtime.hgrn2 import HGRN2 as Model
     else:
         raise SystemExit(f"未支持的 --hf-arch: {args.hf_arch}")
 
@@ -265,6 +334,8 @@ def _main_hf(args) -> int:
         c_arch = "mamba2"
     elif args.blob and args.hf_arch == "gla":
         c_arch = "gla"
+    elif args.blob and args.hf_arch == "hgrn2":
+        c_arch = "hgrn2"
     if c_arch == "deltanet":
         # 整模型 C 内核: 前向全在 C, 与 numpy 参考路径逐 token 一致
         from .runtime.deltanet_c import SnDeltaNet
@@ -278,6 +349,10 @@ def _main_hf(args) -> int:
         from .runtime.gla_c import SnGLA
         m = _CAdapter(SnGLA(args.blob, _dn_vocab(args.blob, args.hf_dir),
                             threads=args.threads), args.hf_dir)
+    elif c_arch == "hgrn2":
+        from .runtime.hgrn2_c import SnHGRN2
+        m = _CAdapter(SnHGRN2(args.blob, _dn_vocab(args.blob, args.hf_dir),
+                              threads=args.threads), args.hf_dir)
     else:
         m = Model(args.hf_dir)
     load_s = time.perf_counter() - t0
@@ -373,8 +448,10 @@ def main(argv=None):
                     help="--gguf 时的执行后端; c = C 内核整模型单步")
     ap.add_argument("--blob", default=None,
                     help="C 内核权重 blob: RWKV-7 的 --gguf-backend c 用它, "
-                         "或 --hf-arch deltanet|mamba2|gla 时指向对应的 .c.bin "
-                         "(整模型前向在 C)")
+                         "或 --hf-arch deltanet|mamba2|gla|hgrn2 时指向对应的 .c.bin "
+                         "(整模型前向在 C); 单独给出时按 RWKV-7 blob 直接推理")
+    ap.add_argument("--vocab", type=int, default=0,
+                    help="单独用 --blob 时的词表大小 (默认 65536)")
     ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
     ap.add_argument("--half", action="store_true",
@@ -382,7 +459,8 @@ def main(argv=None):
                          "读字节减半, 单步约快 1.3x, logits 相对偏差约 7e-4")
     ap.add_argument("--hf-dir", default=None,
                     help="HF 权重目录 (Mamba-2 / DeltaNet / GLA), 与 --ckpt/--gguf 三选一")
-    ap.add_argument("--hf-arch", choices=["mamba2", "deltanet", "gla"], default="mamba2",
+    ap.add_argument("--hf-arch", choices=["mamba2", "deltanet", "gla", "hgrn2"],
+                    default="mamba2",
                     help="--hf-dir 的架构")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
@@ -394,8 +472,10 @@ def main(argv=None):
         if args.gguf_backend == "c":
             return _main_gguf_c(args)
         return _main_gguf(args)
+    if args.blob and not args.ckpt:
+        return _main_rwkv7_blob(args)
     if not args.ckpt:
-        raise SystemExit("需要 --ckpt / --gguf / --hf-dir 之一")
+        raise SystemExit("需要 --ckpt / --gguf / --hf-dir / --blob 之一")
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)

@@ -5,6 +5,7 @@ runs/
 # 实验权重 (由 _ood.py 等脚本重新训练生成)
 experiments/ckpts_ood/
 experiments/ckpts_100m/
+experiments/ckpts_longrecall/
 
 # 基准输出 (由 experiments 脚本重新生成)
 results/
@@ -26,6 +27,7 @@ htmlcov/
 
 # 本机环境探测脚本 (含绝对路径, 无移植价值)
 experiments/_*.bat
+experiments/_dl_*.sh
 
 # 本地工作记忆 (仅本机, 不入库)
 .workbuddy/
@@ -58,6 +60,7 @@ experiments/gguf/
 
 # 第三方参考实现 (仅本地对照用, 版权归原作者)
 .ref/
+experiments/_ref_*.py
 
 # 构建产物
 dist/
