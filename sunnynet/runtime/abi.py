@@ -43,17 +43,17 @@ def abi_available() -> bool:
     return _find_gcc() is not None or _native.locate(DLL.name) is not None
 
 
+def _link_cmd(gcc: str, dst) -> list[str]:
+    return ([gcc] + compile_flags() + [str(HERE / s) for s in SOURCES]
+            + ["-o", str(dst)])
+
+
 def _compile(gcc: str) -> None:
-    import subprocess
+    from .. import _native
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc] + compile_flags()
-    cmd += [str(HERE / s) for s in SOURCES]
-    cmd += ["-o", str(DLL)]
-    # 编译器在 Windows 下按系统代码页输出路径, 非 UTF-8; 报错解码需容错
-    r = subprocess.run(cmd, capture_output=True)
-    if r.returncode != 0:
-        err = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")
-        raise RuntimeError(f"ABI 库编译失败: {err[-900:]}")
+    rc, msg = _native.run_cc(_link_cmd(gcc, DLL))
+    if rc != 0:
+        raise RuntimeError(f"ABI 库编译失败: {msg[-900:]}")
 
 
 def _needs_rebuild() -> bool:

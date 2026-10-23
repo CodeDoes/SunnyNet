@@ -2,6 +2,18 @@
 
 ## 未发布
 
+### DeltaNet 整模型 C 内核
+- `runtime/deltanet.c`：整个前向在 C（三路深度短卷积 + 逐 head L2 + delta rule +
+  RMSNorm + SwiGLU），权重由 `experiments/_export_deltanet.py` 导成 fp32 blob。
+  Python 侧 `sunnynet.runtime.deltanet_c.SnDeltaNet`，CLI `--hf-arch deltanet --blob`。
+- 对 numpy 参考路径 36 token：logits max|diff| **1.335e-05**、argmax **36/36**、
+  重复运行与 reset 后重跑逐位 0.0、prefill 与逐步 0.0。
+- 速度单步 78.69 → **71.24 ms/token（1.10×，5/5 逐轮占优）**。只有 1.10× 的原因是
+  **两条路径都撞在内存带宽墙**：C 侧有效带宽 19.18 GB/s，已超单线程顺序读上限
+  18.63 GB/s。对访存受限的整模型解码，C 化收益上限由带宽决定。
+- 线程数取物理核（6 线程 64.33 ms / 21.24 GB/s，优于 12 逻辑核 68.55 ms）；
+  默认自动取物理核。`tests/test_deltanet_c.py` 7 项。
+
 ### 矩阵值 rank-1 递推内核
 - 新增 `sn_mat_scan`（`runtime/recur.c`，声明见 `recur.h`）：统一形式
   `p=S·u; S=S⊙w+v⊗k−p⊗b; y=S·r`，参数传 `NULL` 即跳过，覆盖 RWKV-7 与 DeltaNet
@@ -17,8 +29,23 @@
   `locate()` 载入前比对；源码改过但没重编时不再静默命中旧库，直接回退源码编译
   （开发中真实踩到：`sn_mat_scan` 已编入源码却报 `AttributeError`）。
 - 比对内容哈希而非 mtime——pip 解包会把源码 mtime 刷成解包时刻，按时间判会恒判过期。
-  隔离安装实测六库全命中、`prebuilt_stale()` 为 False。
-- 契约测试 `tests/test_native_prebuilt.py`（5 项）。
+  隔离安装实测七库全命中、`prebuilt_stale()` 为 False。库数由 §DeltaNet 增至 7。
+- 契约测试 `tests/test_native_prebuilt.py`（7 项）。
+
+### 构建期的两个 Windows 缺陷
+- `build_prebuilt()` 原先直接调各模块 `_compile`，写的是共享的 `<pkg>/_build/<dll>`；
+  该文件一旦被本进程加载过，Windows 拒绝覆盖写，编译即失败（全量测试顺序依赖地报
+  3 个 `RuntimeError`，单跑该文件却全过）。改为编译到临时目录再复制；产物 dll 被占用
+  时按库单独捕获 `PermissionError`，不拖垮其余。
+- 六处 `_compile` 用 `subprocess.run(..., text=True)` 按 UTF-8 解码，而 Windows 下
+  gcc 诊断按系统代码页（GBK）输出，路径含非 ASCII 时抛 `UnicodeDecodeError` 掩盖真实
+  错误（只有 `abi.py` 单独容错过）。统一走 `_native.run_cc()` 收 bytes 再容错解码。
+- 各模块新增 `_link_cmd(gcc, dst)`，`_compile` 只负责写到目标路径；契约测试断言每个
+  模块都提供该接口。
+- `deltanet_c._recommended_threads()` 不再自行 `CDLL` 拼接 `_build/sunnynet_model.dll`
+  （绕过预编译查找、且是上条的触发源），改为复用 `runtime.model.recommended_threads()`。
+- `prebuilt_stale()` 的判定有进程内缓存，`build_prebuilt()` 重建后未清，导致「改源码
+  → 重建 → 加载」一直读到过期结论（等于仍退回源码编译）。重建末尾清缓存。
 
 ### fp16 权重解码路径
 - 新增 `sn_load_h()`：载入时把 5 个 GEMV 矩阵与 LM head 截断为 fp16，小参数仍 fp32；
@@ -114,7 +141,7 @@
 ### 已知边界
 - 内核需 AVX2/FMA 与 C 编译器（首次调用自动编译）。
 - INT4 质量：英文保持，中文与代码有退化，未配校准。
-- Mamba-2 / DeltaNet / GLA 目前只有 numpy 参考路径（单线程 45.7 / 91.5 / 85.1 ms/token），
-  尚未 C 化。矩阵值 rank-1 递推已进 C 内核（`sn_mat_scan`），但实测只占 DeltaNet 单步
-  2.2%，整模型提速需把前向搬进 C。
+- Mamba-2 / GLA 目前只有 numpy 参考路径（单线程 45.7 / 85.1 ms/token），尚未 C 化。
+  DeltaNet 整模型已进 C（`sn_dn_step`），但受内存带宽限制只有 1.10×。
+- DeltaNet 的 C 路径需要预导出的 1.37 GB fp32 blob（`--blob`），不随包分发。
 - 0.5B 预设在本机 6GB 显卡为边界态，未发布质量数字。

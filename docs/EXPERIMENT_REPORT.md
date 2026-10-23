@@ -2721,9 +2721,53 @@ y[i]   = Σ_j S[i][j] · r[j]
 GEMV（`step()` 自身 tottime 占 81.5%），要真正提速必须把整模型前向搬进 C（任务 #71），
 而不是把某个算子局部 C 化。此结论与 §24.6 的教训一致：算子级优势会被端到端摊薄。
 
-**（6）开发中定位的坑**
+**（6）DeltaNet 整模型进 C**（`runtime/deltanet.c`，任务 #70 的后续）
 
-**（5）开发中定位的坑**
+§24.12(5) 的结论是算子级 C 化只占 DeltaNet 单步 2.2%，故把**整个前向**搬进 C
+（`sn_dn_load` / `sn_dn_step` / `sn_dn_prefill`），权重由 `experiments/_export_deltanet.py`
+导成 1.37 GB 的 fp32 blob（体积大，不入库；`--blob` 指向它，`--hf-arch deltanet`）。
+
+对照 numpy 参考路径（独立实现，einsum 路径），36 token 逐步：
+
+| 检查 | 结果 |
+|---|---|
+| logits max\|diff\| | **1.335e-05** |
+| argmax 一致 | **36/36** |
+| 重复运行 bit 稳定 | **0.0** |
+| reset 后重跑与首次 | **0.0** |
+| prefill vs 逐步 | **0.0** |
+
+速度（`experiments/_deltanet_c_bench.py`，每格独立子进程 × 5 轮交错）：
+
+| 轮 | numpy ms | C ms | C 倍数 |
+|---|---|---|---|
+| 0 | 79.42 | 71.12 | 1.12× |
+| 1 | 78.69 | 72.60 | 1.08× |
+| 2 | 84.69 | 70.10 | 1.21× |
+| 3 | 78.61 | 71.91 | 1.09× |
+| 4 | 76.71 | 71.24 | 1.08× |
+| 中位 | 78.69 | 71.24 | **1.10×（5/5 逐轮占优）** |
+
+**为什么只有 1.10×，而 RWKV-7 有 5.39×**：DeltaNet 单步要把 1.37 GB 权重全读一遍，
+71.24 ms 对应有效带宽 **19.18 GB/s**，numpy 的 17.36 GB/s 也已逼近单线程顺序读上限
+（`bench_bw.c` 实测 18.63 GB/s）——**两条路径都撞在带宽墙上**，C 化只能拿到残差。
+RWKV-7 的 5.39× 来自它的 numpy 参考（部分整段物化，366 ms）远未受带宽约束，两者
+不可类比。⇒ **对访存受限的整模型解码，C 化的收益上限由带宽决定，不由实现语言决定。**
+
+线程缩放（同进程 30 步中位，权重 1.37 GB）：
+
+| 线程 | ms | 有效带宽 GB/s |
+|---|---|---|
+| 1 | 97.08 | 14.08 |
+| 4 | 67.84 | 20.14 |
+| **6（物理核）** | **64.33** | **21.24** |
+| 8 | 74.14 | 18.43 |
+| 12 | 68.55 | 19.93 |
+
+与 §24.7b 的 p100mw 同理：**取物理核数**（6）优于逻辑核（12）。默认线程数由
+`SnDeltaNet(..., threads=None)` 自动取物理核。
+
+**（7）开发中定位的坑**
 - Mamba-2 的 `config.json` 缺 `state_size` / `n_groups`；`conv_dim` 只定出二者**乘积**
   （`(conv_dim − d_inner)/2 = 128`），单看权重无法拆分。`(8,16)` / `(1,128)` / `(2,64)` / `(4,32)`
   四种拆分与官方前向都吻合到同一量级，必须回到 `mamba_ssm` 默认值才能定案。
@@ -2732,9 +2776,32 @@ GEMV（`step()` 自身 tottime 占 81.5%），要真正提速必须把整模型�
 - `state-spaces/mamba2-130m` 不含 tokenizer；用 Llama tokenizer（vocab 32000）喂
   50277 词表的模型会得到乱码，须另取 GPT-NeoX tokenizer（vocab 50254）。
 
+**（8）DeltaNet C 内核开发中定位的五个真实缺陷**（逐层对表定位，非静态自检）
+
+1. **`l2norm` 写成了逐 8 宽分块归一化**，应对整个 head（128 维）求一次范数。症状：
+   `v`（不做 l2norm）逐位一致，`q`/`k` 差 0.09 / 0.99 —— 差异只出现在做了归一化的张量上。
+2. **`dconv_silu` 原地调用时把 silu 后的值存进历史**。参考实现存的是卷积**输入**
+   （`hist[-1] = x`，即 conv 前的投影值）；原地写回后 `x` 已是 silu 结果，`memcpy` 会存错。
+   须留一个 `tmp` 缓冲先拷原始输入。**单步看不出来，历史全 0 时两种写法结果相同**——
+   必须跑到第 4 步（conv=4）以上才会暴露。
+3. **`o_norm` 要逐 head 归一化**，不是整段 1024 维一次归一；且 `o_proj` 的输入维是
+   `NH·HV`，不是 `HV`。
+4. **权重转置方向**。HF 存 `(out,in)`；若 C 侧 `gemv` 按 `(out,in)` 行主序、每行连续读，
+   就**不需要转置**。第一版把 `gemv` 写成按 `(in,out)` 读，于是导出器转置了矩阵——
+   方阵（1024×1024）转置后不报错、也不等于自身，只会静默算成别的式子。
+   最终改为与 `sunnynet.c` 同一套 `(out,in)` + 按输出通道并行，导出器不再转置。
+5. **tied 时 `head` 与 `embed` 都是 `(vocab,D)`**，正是 `gemv` 要的 `(out,in)` 布局；
+   第一版额外做了一份转置，反而算错。三个 tie 场景（`tied_head=1`）须与 HF 的
+   `lm_head` 语义对齐后再定布局。
+
+定位手段：在 C 侧加 `sn_dn_dbg` / `sn_dn_dbg3` 转储逐层与层内各阶段中间量，
+与 numpy 参考**逐项**对表。五处缺陷里有四处是纯数值错位（不崩、不报错），
+只能靠中间量比对揪出。
+
 ### 24.13 预编译原生库
 
-前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`）
+前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`，
+§24.12 加入 DeltaNet 整模型库后为 **7 个**）
 原本都在**首次调用时用本机 gcc 现编**，因此 `pip install` 之后仍需另装 C 编译器。
 本节把编译挪到 **wheel 构建期**：构建机上编好、产物随包分发，装机后直接加载。
 
@@ -2770,7 +2837,7 @@ AVX2+FMA 的机器能执行，故判定按**指令集**而非仅按平台（`isa
 单一平台产出，`_prebuilt/` 不入 sdist（只带 C 源码）。
 
 **产物与源码的一致性检测**。开发态下改了 C 源码但不重编，加载器会静默命中旧的预编译
-库——本轮开发中真实发生过：`sn_mat_scan` 编译通过，Python 侧却报 `AttributeError`，
+库——开发中真实发生过：`sn_mat_scan` 编译通过，Python 侧却报 `AttributeError`，
 因为命中的是改动前的 `sunnynet_runtime.dll`。故 `build_prebuilt()` 额外写出
 `_prebuilt/<标签>/sources.sha256`（按库分组的源码内容哈希），`locate()` 载入前比对。
 
@@ -2790,6 +2857,35 @@ AVX2+FMA 的机器能执行，故判定按**指令集**而非仅按平台（`isa
 | `load_runtime()` 实际加载路径 | 指向安装目录下的 `sunnynet_runtime.dll` |
 | `prebuilt_stale()`（含清单） | False——内容哈希一致，未误判过期 |
 | 隔离环境调用 `mat_step` | max\|diff\| 1.43e-06（对 numpy 参考） |
+
+**构建期的两个真实缺陷**（都在 Windows 上炸，Linux 不复现）：
+
+一、`build_prebuilt()` 原先直接调各模块的 `_compile(gcc)`，写的是**共享的**
+`<pkg>/_build/<dll>`。该文件一旦被本进程（或同一测试会话里先跑的其他用例）加载过，
+Windows 不允许覆盖写，gcc 写不进去即报编译失败。此前全量测试顺序依赖地出现 3 个
+`RuntimeError`，单独跑该文件却全过。修法：编译落到 `tempfile.TemporaryDirectory()`，
+产物再复制到目标目录。新增回归用例——先 `model._load()` 令 dll 处于已加载态，再断言
+七库全部写出。
+
+二、`subprocess.run(..., text=True)` 按 UTF-8 解码子进程输出，Windows 下 gcc 的诊断
+按**系统代码页**（简体中文为 GBK）输出，源码路径含非 ASCII 时解码即抛
+`UnicodeDecodeError`——真实编译错误被异常自己盖掉。六处 `_compile` 里只有 `abi.py`
+单独做了容错解码，其余五处没有。修法：统一走 `_native.run_cc()`，收 bytes 再
+`decode("utf-8", errors="replace")`。
+
+同源问题还有一处：`deltanet_c._recommended_threads()` 直接 `CDLL` 拼接
+`_build/sunnynet_model.dll`，既绕过预编译库查找，也是上条缺陷的触发源；改为复用
+`runtime.model.recommended_threads()`。产物目录下的 dll 若已被加载，复制同样被拒，
+故 `build_prebuilt()` 对每个库单独捕获 `PermissionError`，被占用的库单列说明而不整体
+失败。
+
+三、`prebuilt_stale()` 的判定结果有进程内缓存，但 `build_prebuilt()` 重建后没清它——
+「改源码 → 重建 → 加载」的正常开发流程会一直读到旧的过期结论，等于每次仍退回源码编译。
+修法：重建末尾 `_STALE_CACHE.clear()`。
+
+**契约测试**：`tests/test_native_prebuilt.py` 现 7 项，覆盖清单与源码一致、篡改哈希
+判过期、无清单不误判、源码缺失不误判、已加载态下重建、重建后清缓存，以及每个模块都
+提供 `_link_cmd` 与 `DLL`。
 
 ---
 
@@ -2993,8 +3089,12 @@ python -X utf8 experiments/_rwkv7_int4_quality.py            # §24.11 INT4 质�
 python -X utf8 -m pytest tests/test_rwkv7_c.py -v
 python -X utf8 -m pytest tests/test_quant_i4.py -v
 python -X utf8 experiments/_mat_scan_bench.py                # §24.12 矩阵值内核算子级与占比
+python -X utf8 experiments/_export_deltanet.py MDIR MDIR/deltanet.c.bin  # §24.12 导出 C blob
+python -X utf8 experiments/_deltanet_c_equiv.py              # §24.12 DeltaNet C vs numpy
+python -X utf8 experiments/_deltanet_c_bench.py 5            # §24.12 DeltaNet C 速度
 python -X utf8 experiments/_deltanet_check.py                # §24.12 DeltaNet 正确性
 python -X utf8 -m pytest tests/test_mat_scan.py -v
+python -X utf8 -m pytest tests/test_deltanet_c.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。

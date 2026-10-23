@@ -16,14 +16,17 @@ def rwkv7_available() -> bool:
     return _find_gcc() is not None or _native.locate(DLL.name) is not None
 
 
+def _link_cmd(gcc: str, dst) -> list[str]:
+    return [gcc] + compile_flags() + [
+        str(HERE / "rwkv7.c"), str(HERE / "quant.c"), "-o", str(dst)]
+
+
 def _compile(gcc: str) -> None:
-    import subprocess
+    from .. import _native
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc] + compile_flags() + [
-        str(HERE / "rwkv7.c"), str(HERE / "quant.c"), "-o", str(DLL)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        raise RuntimeError(f"rwkv7 runtime 编译失败: {(r.stderr or r.stdout)[-800:]}")
+    rc, msg = _native.run_cc(_link_cmd(gcc, DLL))
+    if rc != 0:
+        raise RuntimeError(f"rwkv7 runtime 编译失败: {msg[-800:]}")
 
 
 def _needs_rebuild() -> bool:

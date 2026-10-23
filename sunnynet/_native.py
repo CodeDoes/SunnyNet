@@ -16,7 +16,7 @@ from pathlib import Path
 
 __all__ = [
     "PREBUILT", "platform_tag", "cpu_flags", "isa_ok",
-    "locate", "build_prebuilt", "MODULES", "SOURCES",
+    "locate", "build_prebuilt", "MODULES", "SOURCES", "run_cc",
 ]
 
 HERE = Path(__file__).resolve().parent
@@ -27,6 +27,7 @@ MODULES = (
     "sunnynet.runtime",
     "sunnynet.runtime.model",
     "sunnynet.runtime.rwkv7_c",
+    "sunnynet.runtime.deltanet_c",
     "sunnynet.runtime.quant",
     "sunnynet.runtime.abi",
     "sunnynet.kernels",
@@ -38,6 +39,7 @@ SOURCES = {
     "sunnynet.runtime.model": ("runtime/sunnynet.c", "runtime/sunnynet.h"),
     "sunnynet.runtime.rwkv7_c": ("runtime/rwkv7.c", "runtime/rwkv7.h",
                                  "runtime/quant.c"),
+    "sunnynet.runtime.deltanet_c": ("runtime/deltanet.c", "runtime/deltanet.h"),
     "sunnynet.runtime.quant": ("runtime/quant.c", "runtime/quant.h"),
     "sunnynet.runtime.abi": ("runtime/sn_abi.c", "runtime/sn_abi.h",
                              "runtime/recur.c", "runtime/rwkv7.c",
@@ -50,6 +52,18 @@ SOURCES = {
 def _machine() -> str:
     m = platform.machine().lower()
     return {"amd64": "x86_64", "arm64": "aarch64"}.get(m, m)
+
+
+def run_cc(cmd: list[str]):
+    """跑编译器。Windows 下 gcc 的诊断按系统代码页输出, 中文路径会撞非 UTF-8 字节;
+    带 text=True 会抛 UnicodeDecodeError 把真实编译错误盖掉, 故收 bytes 再容错解码。
+    返回 (returncode, 合并后的诊断文本)。
+    """
+    import subprocess
+
+    r = subprocess.run(cmd, capture_output=True)
+    msg = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")
+    return r.returncode, msg
 
 
 def platform_tag() -> str:
@@ -202,9 +216,13 @@ def build_prebuilt(out_dir: str | Path | None = None):
     同时写出 sources.sha256 清单, 供运行期判定产物是否与源码一致。
     返回 (产物列表, 错误说明)。当前 C 运行时用 -mavx2 编出, 只有 x86-64 能编;
     其他架构返回空列表并说明, 由调用方决定是否视为失败。
+
+    编译落在临时目录: 各模块的 _compile 写的是共享的 <pkg>/_build/<dll>, 该文件
+    一旦被本进程 (或别的测试) 加载过, Windows 不允许覆盖写, 编译必失败。
     """
     import importlib
     import json
+    import tempfile
 
     if _machine() != "x86_64":
         return [], f"{_machine()} 不是 x86-64, 该架构无预编译产物"
@@ -213,16 +231,28 @@ def build_prebuilt(out_dir: str | Path | None = None):
 
     out = Path(out_dir) if out_dir else PREBUILT / platform_tag()
     made: list[Path] = []
-    for name in MODULES:
-        mod = importlib.import_module(name)
-        gcc = mod._find_gcc()
-        if gcc is None:
-            return made, f"未找到 C 编译器, 无法生成预编译库 ({name})"
-        mod._compile(gcc)
-        out.mkdir(parents=True, exist_ok=True)
-        dst = out / mod.DLL.name
-        shutil.copy2(mod.DLL, dst)
-        made.append(dst)
+    skipped: list[str] = []
+    with tempfile.TemporaryDirectory(prefix="sunnynet-build-") as td:
+        tmp = Path(td)
+        for name in MODULES:
+            mod = importlib.import_module(name)
+            gcc = mod._find_gcc()
+            if gcc is None:
+                return made, f"未找到 C 编译器, 无法生成预编译库 ({name})"
+            dst = tmp / mod.DLL.name
+            cmd = mod._link_cmd(gcc, dst)
+            rc, msg = run_cc(cmd)
+            if rc != 0:
+                return made, f"{name} 编译失败: {msg[-500:]}"
+            out.mkdir(parents=True, exist_ok=True)
+            try:
+                shutil.copy2(dst, out / dst.name)
+            except PermissionError:
+                # 目标 dll 已被本进程加载, Windows 不允许覆盖。编译产物仍是新的,
+                # 单独说明而不整体失败 —— 其余库照常写出。
+                skipped.append(f"{dst.name} (已加载, 未覆盖)")
+                continue
+            made.append(out / dst.name)
 
     man = {}
     for name in MODULES:
@@ -232,4 +262,7 @@ def build_prebuilt(out_dir: str | Path | None = None):
     man_p = out / "sources.sha256"
     man_p.write_text(json.dumps(man, indent=1, sort_keys=True), encoding="utf-8")
     made.append(man_p)
+    _STALE_CACHE.clear()      # 产物已刷新, 旧的过期判定失效
+    if skipped:
+        return made, "部分库被占用未覆盖: " + ", ".join(skipped)
     return made, None

@@ -54,9 +54,11 @@ class build_py(_build_py):
         except Exception as e:
             print(f"[prebuilt] 编译异常, 跳过: {type(e).__name__}: {e}")
             return
-        if err:
+        if err and not made:
             print(f"[prebuilt] 未生成预编译库: {err}")
             return
+        if err:
+            print(f"[prebuilt] 部分库未生成: {err}")
         dest = (Path(self.build_lib) / "sunnynet" / "_prebuilt"
                 / _native.platform_tag())
         dest.mkdir(parents=True, exist_ok=True)

@@ -14,7 +14,6 @@
 from __future__ import annotations
 
 import ctypes
-import subprocess
 from pathlib import Path
 
 __all__ = [
@@ -102,14 +101,16 @@ def runtime_available() -> bool:
     return _find_gcc() is not None or _native.locate(DLL.name) is not None
 
 
+def _link_cmd(gcc: str, dst) -> list[str]:
+    return [gcc] + compile_flags() + [str(HERE / "recur.c"), "-o", str(dst)]
+
+
 def _compile(gcc: str) -> None:
+    from .. import _native
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc] + compile_flags()
-    cmd += [str(HERE / "recur.c"), "-o", str(DLL)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "")[-800:]
-        raise RuntimeError(f"runtime 编译失败: {tail}")
+    rc, msg = _native.run_cc(_link_cmd(gcc, DLL))
+    if rc != 0:
+        raise RuntimeError(f"runtime 编译失败: {msg[-800:]}")
 
 
 def _needs_rebuild() -> bool:

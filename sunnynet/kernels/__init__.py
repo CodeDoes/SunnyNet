@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import ctypes
 import os
-import subprocess
 import sys
 from pathlib import Path
 
@@ -111,15 +110,17 @@ def kernel_available() -> bool:
     return _find_gcc() is not None and _cpu_has_avx2()
 
 
+def _link_cmd(gcc: str, dst) -> list[str]:
+    return ([gcc] + _compile_flags() + [str(s) for s in SOURCES]
+            + ["-o", str(dst)])
+
+
 def _compile(gcc: str) -> None:
+    from .. import _native
     BUILD.mkdir(parents=True, exist_ok=True)
-    cmd = [gcc] + _compile_flags()
-    cmd += [str(s) for s in SOURCES]
-    cmd += ["-o", str(DLL)]
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    if r.returncode != 0:
-        tail = (r.stderr or r.stdout or "")[-800:]
-        raise RuntimeError(f"kernel 编译失败: {tail}")
+    rc, msg = _native.run_cc(_link_cmd(gcc, DLL))
+    if rc != 0:
+        raise RuntimeError(f"kernel 编译失败: {msg[-800:]}")
 
 
 def _needs_rebuild() -> bool:

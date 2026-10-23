@@ -14,10 +14,13 @@ from sunnynet import _native
 
 
 def test_sources_cover_all_modules():
-    """每个待编译模块都要有源码清单, 否则过期检测漏判。"""
+    """每个待编译模块都要有源码清单与 _link_cmd, 否则构建期才发现缺。"""
     for name in _native.MODULES:
         assert name in _native.SOURCES, name
         assert _native.SOURCES[name]
+        mod = __import__(name, fromlist=["x"])
+        assert hasattr(mod, "_link_cmd"), f"{name} 缺 _link_cmd"
+        assert hasattr(mod, "DLL"), f"{name} 缺 DLL"
 
 
 def test_manifest_written_and_matches(tmp_path):
@@ -78,3 +81,32 @@ def test_missing_source_is_not_stale(tmp_path, monkeypatch):
     monkeypatch.setattr(_native, "_STALE_CACHE", {})
     monkeypatch.setattr(_native, "HERE", tmp_path / "nonexistent")
     assert _native.prebuilt_stale("sunnynet_runtime.dll") is False
+
+
+def test_rebuild_clears_stale_cache(tmp_path, monkeypatch):
+    """重建后应清掉过期缓存, 否则改源码->重建->加载会一直判过期。"""
+    made, err = _native.build_prebuilt(tmp_path)
+    if err:
+        pytest.skip(f"无编译器: {err}")
+    monkeypatch.setattr(_native, "PREBUILT", tmp_path.parent)
+    monkeypatch.setattr(_native, "platform_tag", lambda: tmp_path.name)
+    monkeypatch.setattr(_native, "_STALE_CACHE",
+                        {"sunnynet_runtime.dll": True})
+    _native.build_prebuilt(tmp_path)
+    assert _native._STALE_CACHE == {}
+
+
+def test_build_prebuilt_while_libs_are_loaded(tmp_path):
+    """已加载的 dll 不能被覆盖写 (Windows 会拒绝), 构建必须落在别处。
+
+    回归: build_prebuilt 曾直接调各模块的 _compile, 写的是共享的 _build/<dll>;
+    该文件一旦被本进程加载过, 编译必失败。
+    """
+    from sunnynet.runtime import model
+    model._load()                       # 让 sunnynet_model.dll 处于已加载状态
+    made, err = _native.build_prebuilt(tmp_path)
+    if err:
+        pytest.skip(f"无编译器: {err}")
+    for name in _native.MODULES:
+        dll = __import__(name, fromlist=["x"]).DLL.name
+        assert (tmp_path / dll).is_file(), dll
