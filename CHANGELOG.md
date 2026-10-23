@@ -46,6 +46,9 @@
   （绕过预编译查找、且是上条的触发源），改为复用 `runtime.model.recommended_threads()`。
 - `prebuilt_stale()` 的判定有进程内缓存，`build_prebuilt()` 重建后未清，导致「改源码
   → 重建 → 加载」一直读到过期结论（等于仍退回源码编译）。重建末尾清缓存。
+- 契约测试原先硬编码产物名 `sunnynet_runtime.dll`，而清单键带平台后缀（Linux 为
+  `.so`），在 `ubuntu-latest` 上 `KeyError`；Windows 本地恰好匹配故一直未暴露。
+  改为从模块取 `DLL.name`。
 
 ### fp16 权重解码路径
 - 新增 `sn_load_h()`：载入时把 5 个 GEMV 矩阵与 LM head 截断为 fp16，小参数仍 fp32；

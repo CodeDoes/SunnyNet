@@ -2883,9 +2883,15 @@ Windows 不允许覆盖写，gcc 写不进去即报编译失败。此前全量�
 「改源码 → 重建 → 加载」的正常开发流程会一直读到旧的过期结论，等于每次仍退回源码编译。
 修法：重建末尾 `_STALE_CACHE.clear()`。
 
+四、契约测试里硬编码产物名 `"sunnynet_runtime.dll"`。清单的键是带平台后缀的产物文件名，
+Linux 下是 `sunnynet_runtime.so`，故 `man["sunnynet_runtime.dll"]` 直接 `KeyError`。
+本机是 Windows 恰好匹配，本地一直全绿；CI 的 `architecture-selfcheck` 只在
+`ubuntu-latest` 两个矩阵上红。修法：测试从模块取 `DLL.name`，不写字面量。
+提交 `8a7bfa4` 的 CI 已因此失败。
+
 **契约测试**：`tests/test_native_prebuilt.py` 现 7 项，覆盖清单与源码一致、篡改哈希
 判过期、无清单不误判、源码缺失不误判、已加载态下重建、重建后清缓存，以及每个模块都
-提供 `_link_cmd` 与 `DLL`。
+提供 `_link_cmd` 与 `DLL`。用例名一律取自模块属性，跨平台可跑。
 
 ---
 

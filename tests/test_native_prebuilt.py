@@ -13,6 +13,11 @@ import pytest
 from sunnynet import _native
 
 
+def _dll(mod_name):
+    """产物名带平台后缀 (.dll / .so), 不能硬编码。"""
+    return __import__(mod_name, fromlist=["x"]).DLL.name
+
+
 def test_sources_cover_all_modules():
     """每个待编译模块都要有源码清单与 _link_cmd, 否则构建期才发现缺。"""
     for name in _native.MODULES:
@@ -32,7 +37,7 @@ def test_manifest_written_and_matches(tmp_path):
     man = json.loads(man_p.read_text(encoding="utf-8"))
     # 按库分组, 键为产物文件名
     for name in _native.MODULES:
-        dll = __import__(name, fromlist=["x"]).DLL.name
+        dll = _dll(name)
         assert dll in man, dll
         assert set(man[dll]) == set(_native.SOURCES[name])
         for rel, h in man[dll].items():
@@ -44,27 +49,28 @@ def test_stale_detects_edited_source(tmp_path, monkeypatch):
     made, err = _native.build_prebuilt(tmp_path)
     if err:
         pytest.skip(f"无编译器: {err}")
+    name = _dll("sunnynet.runtime")
     monkeypatch.setattr(_native, "PREBUILT", tmp_path.parent)
     monkeypatch.setattr(_native, "platform_tag", lambda: tmp_path.name)
     monkeypatch.setattr(_native, "_STALE_CACHE", {})
-    assert _native.prebuilt_stale("sunnynet_runtime.dll") is False
+    assert _native.prebuilt_stale(name) is False
 
     rel = "runtime/recur.c"
     src = _native.HERE / rel
     man = json.loads((tmp_path / "sources.sha256").read_text(encoding="utf-8"))
-    man["sunnynet_runtime.dll"][rel] = "0" * 64   # 伪造: 源码哈希与清单不符
+    man[name][rel] = "0" * 64           # 伪造: 源码哈希与清单不符
     (tmp_path / "sources.sha256").write_text(json.dumps(man), encoding="utf-8")
     monkeypatch.setattr(_native, "_STALE_CACHE", {})
-    assert _native.prebuilt_stale("sunnynet_runtime.dll") is True
+    assert _native.prebuilt_stale(name) is True
     assert src.is_file()                    # 只读判定, 不动源码
 
 
 def test_missing_manifest_is_not_stale(tmp_path, monkeypatch):
     """没有清单 (sdist 装出来的包) 时无法判定, 不应误判过期。"""
     monkeypatch.setattr(_native, "PREBUILT", tmp_path)
-    monkeypatch.setattr(_native, "platform_tag", lambda: "win-x86_64")
+    monkeypatch.setattr(_native, "platform_tag", lambda: tmp_path.name)
     monkeypatch.setattr(_native, "_STALE_CACHE", {})
-    assert _native.prebuilt_stale("sunnynet_runtime.dll") is False
+    assert _native.prebuilt_stale(_dll("sunnynet.runtime")) is False
     assert _native.prebuilt_stale() is False
 
 
@@ -73,14 +79,15 @@ def test_missing_source_is_not_stale(tmp_path, monkeypatch):
     made, err = _native.build_prebuilt(tmp_path)
     if err:
         pytest.skip(f"无编译器: {err}")
+    name = _dll("sunnynet.runtime")
     man = json.loads((tmp_path / "sources.sha256").read_text(encoding="utf-8"))
-    man["sunnynet_runtime.dll"]["runtime/recur.c"] = "0" * 64
+    man[name]["runtime/recur.c"] = "0" * 64
     (tmp_path / "sources.sha256").write_text(json.dumps(man), encoding="utf-8")
     monkeypatch.setattr(_native, "PREBUILT", tmp_path.parent)
     monkeypatch.setattr(_native, "platform_tag", lambda: tmp_path.name)
     monkeypatch.setattr(_native, "_STALE_CACHE", {})
     monkeypatch.setattr(_native, "HERE", tmp_path / "nonexistent")
-    assert _native.prebuilt_stale("sunnynet_runtime.dll") is False
+    assert _native.prebuilt_stale(name) is False
 
 
 def test_rebuild_clears_stale_cache(tmp_path, monkeypatch):
@@ -91,22 +98,21 @@ def test_rebuild_clears_stale_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(_native, "PREBUILT", tmp_path.parent)
     monkeypatch.setattr(_native, "platform_tag", lambda: tmp_path.name)
     monkeypatch.setattr(_native, "_STALE_CACHE",
-                        {"sunnynet_runtime.dll": True})
+                        {_dll("sunnynet.runtime"): True})
     _native.build_prebuilt(tmp_path)
     assert _native._STALE_CACHE == {}
 
 
 def test_build_prebuilt_while_libs_are_loaded(tmp_path):
-    """已加载的 dll 不能被覆盖写 (Windows 会拒绝), 构建必须落在别处。
+    """已加载的共享库不能被覆盖写 (Windows 会拒绝), 构建须落在别处。
 
-    回归: build_prebuilt 曾直接调各模块的 _compile, 写的是共享的 _build/<dll>;
+    回归: build_prebuilt 曾直接调各模块的 _compile, 写的是共享的 _build/<lib>;
     该文件一旦被本进程加载过, 编译必失败。
     """
     from sunnynet.runtime import model
-    model._load()                       # 让 sunnynet_model.dll 处于已加载状态
+    model._load()                       # 让 model 库处于已加载状态
     made, err = _native.build_prebuilt(tmp_path)
     if err:
         pytest.skip(f"无编译器: {err}")
     for name in _native.MODULES:
-        dll = __import__(name, fromlist=["x"]).DLL.name
-        assert (tmp_path / dll).is_file(), dll
+        assert (tmp_path / _dll(name)).is_file(), name
