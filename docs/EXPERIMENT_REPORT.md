@@ -3009,6 +3009,38 @@ light element.` → 后半开始循环）与**事实细节错**（1905→1915）
 测试：`tests/test_hgrn2_c.py` 增 3 项（Q4 magic 加载、与 fp32 的有限/有差异/argmax 过半、
 重复运行逐位稳定），全量 **186 passed / 8 skipped**（原 183 / 8，无回归）。
 
+**（14）同一 INT4 机制推广到 GLA 与 DeltaNet**
+
+§24.12 的表里 GLA 的 1.01× 与 DeltaNet 的 1.10× 比 HGRN2 更值得救：两者权重都是
+1.37 GB fp32、**C 化收益已被带宽墙吃掉**，而 INT4 把理论下限从 73.5 ms 压到 14.4 ms。
+
+| 架构 | blob fp32→INT4 | 8 线程 fp32→INT4 | 加速 | 相对误差中位 | argmax |
+|---|---|---|---|---|---|
+| HGRN2-1.3B | 5457.6 → 993.4 MB (5.49×) | 203.33 → 72.19 ms | **2.82×** | 0.242 | 20/36 |
+| GLA-340M | 1366.8 → 305.8 MB (4.47×) | 66.54 → 33.83 ms | **1.97×** | 0.257 | 19/36 |
+| DeltaNet-340M | 1366.4 → 306.7 MB (4.46×) | 70.91 → 35.30 ms | **2.01×** | 0.243 | 33/36 |
+
+单步（state=0）相对误差：HGRN2 0.264 / GLA 0.264 / DeltaNet **0.047** —— DeltaNet 明显更低
+（它的 `q/k/v/o` 是纯线性投影，误差不经过 `exp(g)` 放大），故 argmax 命中 33/36 也最高。
+
+CLI 端到端（`--blob .../xxx.q4.bin`）：
+
+```
+GLA      : The capital of France is the city of Paris.    [decode 12 tok 42.23 ms/tok]
+DeltaNet : The capital of France is Paris. It is the largest city in the world...  [40.06 ms/tok]
+HGRN2    : The capital of France is Paris.                [16 tok 79.86 ms/tok]
+```
+
+不量化的项：GLA 的 `gk_proj.1.weight`（`in = GR = 16` 不满足 block 64，导出器自动回落
+fp32）；DeltaNet 的短卷积核 `q/k/v_conv1d`（是卷积不是 GEMV）与 `b_proj`（`out = NH = 8`，
+体积可忽略）。嵌入表两处都不量化。
+
+blob 协议照搬 HGRN2：新 magic（GLA `QLAG` 0x51414C47 / DeltaNet `QNDD` 0x51444E44），
+每个 GEMV 矩阵前置 `int32` 标签。fp32 blob 与全部既有验证链不动。
+
+测试：`tests/test_gla_c.py`、`tests/test_deltanet_c.py` 各增 2 项（Q4 加载与误差上界、
+重复运行逐位稳定），全量 **190 passed / 8 skipped**（原 186 / 8，无回归）。
+
 ### 24.13 预编译原生库
 
 前十二节的六个共享库（`runtime` / `model` / `rwkv7` / `quant` / `abi` / `kernels`，
@@ -3332,7 +3364,13 @@ python -X utf8 experiments/_hgrn2_int4_equiv.py              # §24.12(13) INT4 
 python -X utf8 experiments/_hgrn2_int4_probe.py              # §24.12(13) 逐层误差定位
 python -X utf8 experiments/_hgrn2_int4_sweep.py              # §24.12(13) 变体对照
 python -X utf8 experiments/_hgrn2_int4_quality.py            # §24.12(13) 真实文本质量
+python -X utf8 experiments/_export_gla.py --int4 MDIR MDIR/gla.q4.bin  # §24.12(14) GLA INT4
+python -X utf8 experiments/_gla_int4_equiv.py                # §24.12(14) GLA INT4 对照
+python -X utf8 experiments/_export_deltanet.py --int4 MDIR MDIR/deltanet.q4.bin  # §24.12(14)
+python -X utf8 experiments/_deltanet_int4_equiv.py           # §24.12(14) DeltaNet INT4 对照
 python -X utf8 -m pytest tests/test_hgrn2_c.py -v
+python -X utf8 -m pytest tests/test_gla_c.py -v
+python -X utf8 -m pytest tests/test_deltanet_c.py -v
 ```
 
 > GGUF 权重与导出的 blob 体积大，由 `experiments/gguf/` 按需获取，不随仓库分发。

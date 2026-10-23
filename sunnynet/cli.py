@@ -267,7 +267,11 @@ def _dn_vocab(blob: str, hf_dir: str) -> int:
     magic = struct.unpack("<i", head[:4])[0]
     if magic in (0x4E4E4444, 0x324E4D53):        # DeltaNet / Mamba-2
         return int(struct.unpack("<8if3i", head[:48])[9])
+    if magic == 0x51444E44:                       # DeltaNet INT4: 头部布局相同
+        return int(struct.unpack("<8if3i", head[:48])[9])
     if magic == 0x414C4753:                       # GLA: 8 int + 4 float 后是 meta
+        return int(struct.unpack("<8i4f5i", head[:68])[12])
+    if magic == 0x51414C47:                       # GLA INT4: 头部布局相同
         return int(struct.unpack("<8i4f5i", head[:68])[12])
     if magic == 0x32474853:                       # HGRN2: 同 GLA 头部布局
         return int(struct.unpack("<8i4f5i", head[:68])[12])

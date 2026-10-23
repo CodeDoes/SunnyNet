@@ -1,5 +1,6 @@
 /* SunnyNet Runtime: DeltaNet 整模型单步解码 (AVX2/FMA). */
 #include "deltanet.h"
+#include "quant.h"
 
 #include <immintrin.h>
 #include <math.h>
@@ -25,16 +26,26 @@ void sn_dn_set_threads(int n) { if (n > 0) omp_set_num_threads(n); }
 int sn_dn_get_threads(void) { return omp_get_max_threads(); }
 
 #define SN_DN_MAGIC 0x4E4E4444   /* "DNND" */
+#define SN_DN_MAGIC_Q4 0x51444E44 /* "QNDD" 带 INT4 标签 */
 #define SN_DN_VERSION 1
+#define SN_DN_BLOCK SN_I4_BLOCK
 
 struct SnLayer;
+
+/* GEMV 矩阵. fp32 时 w 有效; INT4 时 q/scale 有效 (in 按 block 分组). */
+typedef struct {
+    const float* w;
+    const unsigned char* q;
+    const float* scale;
+    int is_q4, in, out;
+} DW;
 
 struct SnDeltaNet {
     int D, NH, HK, HV, F, L, vocab, conv, tied_head;
     float eps;
     const float* embed;      /* (vocab, D) */
     const float* ln_f;       /* (D,) */
-    const float* head;       /* (vocab, D); tied 时为 NULL */
+    DW head;                 /* (vocab, D); tied 时全空 */
     unsigned char* wbuf;
     struct SnLayer* layers;
     float* x;                /* 残差主流 (D,) */
@@ -46,11 +57,11 @@ typedef struct SnLayer {
     int D, NH, HK, HV, KV, VV, F, conv;
     float eps;
     const float *an, *mn;             /* attn_norm / mlp_norm (D,) */
-    const float *qp, *kp, *vp, *op;   /* (in,out) 行主序, y = W x */
-    const float *qc, *kc, *vc;        /* 短卷积核 (n, conv) */
+    DW qp, kp, vp, op;                /* 投影 (out,in), y = W x */
+    const float *qc, *kc, *vc;        /* 短卷积核 (n, conv), 不量化 */
     const float *on;                  /* o_norm (HV,) */
-    const float *bp;                  /* b_proj (NH, D) */
-    const float *gp, *up, *dp;        /* MLP: (F,D) (F,D) (D,F) */
+    const float *bp;                  /* b_proj (NH, D), out=NH 太小不量化 */
+    DW gp, up, dp;                    /* MLP: (F,D) (F,D) (D,F) */
     float* S;                         /* (NH, HK, HV) */
     float* cq, *ck, *cv;              /* (conv-1, KV/VV) 历史 */
     SnDeltaNet* m;
@@ -80,6 +91,14 @@ static void gemv(float* y, const float* x, const float* W, int in, int out) {
         for (; i < in; ++i) s += row[i] * x[i];
         y[j] = s;
     }
+}
+
+/* 按 DW 的存储标志分发: INT4 走 quant.c 的 maddubs 路径。 */
+static inline void gemv_w(float* y, const float* x, const DW* W) {
+    if (W->is_q4)
+        sn_gemv_i4(y, x, W->q, W->scale, W->in, W->out, SN_DN_BLOCK);
+    else
+        gemv(y, x, W->w, W->in, W->out);
 }
 
 /* 无偏置 RMSNorm: y = x / rms(x) * g (均值平方, 同 HF LlamaRMSNorm)。 */
@@ -195,6 +214,34 @@ static const float* take_f32(Cur* c, size_t n) {
     return r;
 }
 
+/* 带标签的 GEMV 矩阵. 标签 1: INT4 = q(out,in/2 字节) + scale(out,in/block);
+ * 标签 0: fp32 (out,in). 仅 Q4 magic 的文件有标签, fp32 文件仍是无标签的裸流。 */
+static void take_mat(Cur* c, DW* W, int in, int out, int tagged) {
+    W->in = in;
+    W->out = out;
+    W->w = NULL;
+    W->q = NULL;
+    W->scale = NULL;
+    W->is_q4 = 0;
+    int tag = 0;
+    if (tagged) {
+        memcpy(&tag, c->p, sizeof(int));
+        c->p += sizeof(int);
+    }
+    if (tag == 1) {
+        const size_t qb = (size_t)out * (size_t)(in / 2);
+        const size_t sb = (size_t)out * (size_t)(in / SN_DN_BLOCK) * sizeof(float);
+        W->is_q4 = 1;
+        W->q = c->p;
+        c->p += qb;
+        W->scale = (const float*)c->p;
+        c->p += sb;
+    } else {
+        W->w = (const float*)c->p;
+        c->p += (size_t)in * out * sizeof(float);
+    }
+}
+
 static int rd_i32(FILE* f, int32_t* o, int n) {
     return (int)fread(o, sizeof(int32_t), (size_t)n, f) == n;
 }
@@ -203,10 +250,13 @@ SnDeltaNet* sn_dn_load(const char* path) {
     FILE* f = sn_fopen(path, "rb");
     if (!f) return NULL;
     int32_t h[8];
-    if (!rd_i32(f, h, 8) || h[0] != SN_DN_MAGIC || h[1] != SN_DN_VERSION) {
+    if (!rd_i32(f, h, 8)
+        || (h[0] != SN_DN_MAGIC && h[0] != SN_DN_MAGIC_Q4)
+        || h[1] != SN_DN_VERSION) {
         fclose(f);
         return NULL;
     }
+    const int tagged = (h[0] == SN_DN_MAGIC_Q4);
     const int L = h[2], D = h[3], NH = h[4], HK = h[5], HV = h[6], F = h[7];
     float hf[1];
     if (fread(hf, sizeof(float), 1, f) != 1) { fclose(f); return NULL; }
@@ -239,23 +289,28 @@ SnDeltaNet* sn_dn_load(const char* path) {
         A->eps = m->eps;
         /* 顺序由导出器 _export_deltanet.py 决定, 两处必须同步改 */
         A->an = take_f32(&c, D);
-        A->qp = take_f32(&c, (size_t)D * D);
-        A->kp = take_f32(&c, (size_t)D * D);
-        A->vp = take_f32(&c, (size_t)D * D);
-        A->op = take_f32(&c, (size_t)D * D);
+        take_mat(&c, &A->qp, D, D, tagged);
+        take_mat(&c, &A->kp, D, D, tagged);
+        take_mat(&c, &A->vp, D, D, tagged);
+        take_mat(&c, &A->op, D, D, tagged);
         A->qc = take_f32(&c, (size_t)A->KV * m->conv);
         A->kc = take_f32(&c, (size_t)A->KV * m->conv);
         A->vc = take_f32(&c, (size_t)A->VV * m->conv);
         A->on = take_f32(&c, HV);
         A->bp = take_f32(&c, (size_t)NH * D);
         A->mn = take_f32(&c, D);
-        A->gp = take_f32(&c, (size_t)F * D);
-        A->up = take_f32(&c, (size_t)F * D);
-        A->dp = take_f32(&c, (size_t)D * F);
+        take_mat(&c, &A->gp, D, F, tagged);
+        take_mat(&c, &A->up, D, F, tagged);
+        take_mat(&c, &A->dp, F, D, tagged);
     }
     m->embed = take_f32(&c, (size_t)m->vocab * D);
     m->ln_f = take_f32(&c, D);
-    m->head = m->tied_head ? NULL : take_f32(&c, (size_t)m->vocab * D);
+    if (!m->tied_head)
+        take_mat(&c, &m->head, D, m->vocab, tagged);
+    else {
+        m->head.w = NULL; m->head.q = NULL; m->head.scale = NULL;
+        m->head.is_q4 = 0; m->head.in = D; m->head.out = m->vocab;
+    }
 
     for (int l = 0; l < L; ++l) {
         SnLayer* A = &m->layers[l];
@@ -324,9 +379,9 @@ static void dn_layer(SnLayer* A, float* x) {
     float* u = g + F;
 
     rms_norm(h, x, A->an, D, A->eps);
-    gemv(q, h, A->qp, D, KV);
-    gemv(k, h, A->kp, D, KV);
-    gemv(v, h, A->vp, D, VV);
+    gemv_w(q, h, &A->qp);
+    gemv_w(k, h, &A->kp);
+    gemv_w(v, h, &A->vp);
     dconv_silu(q, q, g, A->cq, A->qc, KV, A->conv);
     dconv_silu(k, k, g, A->ck, A->kc, KV, A->conv);
     dconv_silu(v, v, g, A->cv, A->vc, VV, A->conv);
@@ -343,14 +398,14 @@ static void dn_layer(SnLayer* A, float* x) {
     /* o_norm 逐 head 归一化 (参考实现按 (NH,HV) 的最后一维算) */
     for (int hh = 0; hh < NH; ++hh)
         rms_norm(o + (size_t)hh * HV, o + (size_t)hh * HV, A->on, HV, A->eps);
-    gemv(h, o, A->op, VV, D);
+    gemv_w(h, o, &A->op);
     for (int i = 0; i < D; ++i) x[i] += h[i];
 
     rms_norm(h, x, A->mn, D, A->eps);
-    gemv(g, h, A->gp, D, F);
-    gemv(u, h, A->up, D, F);
+    gemv_w(g, h, &A->gp);
+    gemv_w(u, h, &A->up);
     for (int i = 0; i < F; ++i) g[i] = silu(g[i]) * u[i];
-    gemv(h, g, A->dp, F, D);
+    gemv_w(h, g, &A->dp);
     for (int i = 0; i < D; ++i) x[i] += h[i];
 }
 
@@ -360,7 +415,10 @@ static void dn_forward(SnDeltaNet* m, int token, float* logits) {
     memcpy(x, m->embed + (size_t)token * D, (size_t)D * sizeof(float));
     for (int l = 0; l < m->L; ++l) dn_layer(&m->layers[l], x);
     rms_norm(x, x, m->ln_f, D, m->eps);
-    gemv(logits, x, m->head ? m->head : m->embed, D, m->vocab);
+    if (m->head.w || m->head.is_q4)
+        gemv_w(logits, x, &m->head);
+    else
+        gemv(logits, x, m->embed, D, m->vocab);   /* tied: 复用嵌入表 */
 }
 
 void sn_dn_step(SnDeltaNet* m, int token, float* logits) {

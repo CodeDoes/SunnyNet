@@ -21,7 +21,8 @@ def deltanet_available() -> bool:
 
 
 def _link_cmd(gcc: str, dst) -> list[str]:
-    return [gcc] + compile_flags() + [str(HERE / "deltanet.c"), "-o", str(dst)]
+    return [gcc] + compile_flags() + [
+        str(HERE / "deltanet.c"), str(HERE / "quant.c"), "-o", str(dst)]
 
 
 def _compile(gcc: str) -> None:
@@ -37,7 +38,8 @@ def _needs_rebuild() -> bool:
         return True
     t = DLL.stat().st_mtime
     return any(s.stat().st_mtime > t
-               for s in (HERE / "deltanet.c", HERE / "deltanet.h"))
+               for s in (HERE / "deltanet.c", HERE / "deltanet.h",
+                         HERE / "quant.c"))
 
 
 _lib = None

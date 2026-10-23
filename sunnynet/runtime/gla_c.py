@@ -21,7 +21,8 @@ def gla_available() -> bool:
 
 
 def _link_cmd(gcc: str, dst) -> list[str]:
-    return [gcc] + compile_flags() + [str(HERE / "gla.c"), "-o", str(dst)]
+    return [gcc] + compile_flags() + [
+        str(HERE / "gla.c"), str(HERE / "quant.c"), "-o", str(dst)]
 
 
 def _compile(gcc: str) -> None:
@@ -37,7 +38,7 @@ def _needs_rebuild() -> bool:
         return True
     t = DLL.stat().st_mtime
     return any(s.stat().st_mtime > t
-               for s in (HERE / "gla.c", HERE / "gla.h"))
+               for s in (HERE / "gla.c", HERE / "gla.h", HERE / "quant.c"))
 
 
 _lib = None

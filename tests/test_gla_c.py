@@ -18,10 +18,15 @@ MDIR = os.environ.get("SUNNY_GLA",
                       str(Path(__file__).resolve().parents[1]
                           / "models" / "gla-340M"))
 BLOB = Path(MDIR) / "gla.c.bin"
+BLOB4 = Path(MDIR) / "gla.q4.bin"
 
 pytestmark = pytest.mark.skipif(
     not gla_available() or not BLOB.is_file(),
     reason="无 C 编译器/预编译库, 或缺少权重 blob")
+
+q4mark = pytest.mark.skipif(
+    not gla_available() or not BLOB4.is_file(),
+    reason="缺少 INT4 blob (gla.q4.bin)")
 
 
 @pytest.fixture(scope="module")
@@ -102,3 +107,30 @@ def test_head_wise_value_is_not_shared(m):
     ref = m.step(1, st)
     c = np.asarray(h.step(1))
     assert float(np.abs(c - ref).max()) < 1e-4, float(np.abs(c - ref).max())
+
+
+@q4mark
+def test_int4_loads_and_stays_finite(m):
+    """Q4 blob 走带标签的解析路径; 相对误差上限 0.6 (4-bit 理论 ~0.10,
+    多步递推累积后实测 0.26–0.35), 只挡解析/索引错位的离谱值。"""
+    h32 = SnGLA(BLOB, m.vocab)
+    h4 = SnGLA(BLOB4, m.vocab)
+    assert h4.vocab == m.vocab
+    ids = list(range(5, 15))
+    a = np.stack([np.asarray(h32.step(t)) for t in ids])
+    b = np.stack([np.asarray(h4.step(t)) for t in ids])
+    assert np.isfinite(b).all()
+    d = float(np.abs(a - b).max()) / max(float(np.abs(a).max()), 1e-9)
+    assert 0.0 < d < 0.6, f"相对 max|diff|={d:.3e}"
+    agree = sum(int(a[i].argmax() == b[i].argmax()) for i in range(len(ids)))
+    assert agree >= len(ids) // 2, f"argmax 一致性 {agree}/{len(ids)}"
+
+
+@q4mark
+def test_int4_repeated_run_is_bit_stable():
+    h = SnGLA(BLOB4, 32000)
+    ids = list(range(5, 15))
+    a = np.stack([np.asarray(h.step(t)) for t in ids])
+    h.reset()
+    b = np.stack([np.asarray(h.step(t)) for t in ids])
+    assert float(np.abs(a - b).max()) == 0.0

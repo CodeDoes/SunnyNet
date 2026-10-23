@@ -1,5 +1,6 @@
 /* SunnyNet Runtime: GLA 整模型单步解码 (AVX2/FMA). */
 #include "gla.h"
+#include "quant.h"
 
 #include <immintrin.h>
 #include <math.h>
@@ -25,18 +26,30 @@ void sn_gla_set_threads(int n) { if (n > 0) omp_set_num_threads(n); }
 int sn_gla_get_threads(void) { return omp_get_max_threads(); }
 
 #define SN_GLA_MAGIC 0x414C4753   /* "SGLA" */
+#define SN_GLA_MAGIC_Q4 0x51414C47 /* "QLAG" 带 INT4 标签 */
 #define SN_GLA_VERSION 1
+#define SN_GLA_BLOCK SN_I4_BLOCK
 
 struct SnGLA;
+
+/* GEMV 矩阵. fp32 时 w 有效; INT4 时 q/scale 有效 (in 按 block 分组). */
+typedef struct {
+    const float* w;
+    const unsigned char* q;
+    const float* scale;
+    int is_q4, in, out;
+} GW;
 
 typedef struct SnLayer {
     int D, NH, HK, HV, GR, KD, VD, F, idx;
     float eps, scale, gnorm;
     const float *an, *mn;             /* attn_norm / mlp_norm (D,) */
-    const float *qp, *kp, *vp, *op;   /* (out,in) 行主序 */
-    const float *g0, *g1w, *g1b;      /* gk 低秩: (GR,D) (KD,GR) (KD,) */
-    const float *gp, *gn;             /* g_proj (VD,D), g_norm_swish_gate (HV,) */
-    const float *mgp, *mup, *mdp;     /* MLP: (F,D) (F,D) (D,F) */
+    GW qp, kp, vp, op;                /* 投影 (out,in) */
+    GW g0, g1w;                       /* gk 低秩: (GR,D) (KD,GR) */
+    const float *g1b;
+    GW gp;                            /* g_proj (VD,D) */
+    const float *gn;                  /* g_norm_swish_gate (HV,) */
+    GW mgp, mup, mdp;                 /* MLP: (F,D) (F,D) (D,F) */
     float* S;                         /* (NH, HK, HV) */
     struct SnGLA* m;
 } SnLayer;
@@ -48,7 +61,7 @@ struct SnGLA {
     float clamp_min;
     const float* embed;
     const float* ln_f;
-    const float* head;
+    GW head;
     unsigned char* wbuf;
     SnLayer* layers;
     float* x;
@@ -82,6 +95,14 @@ static void gemv(float* y, const float* x, const float* W, int in, int out) {
         for (; i < in; ++i) s += row[i] * x[i];
         y[j] = s;
     }
+}
+
+/* 按 GW 的存储标志分发: INT4 走 quant.c 的 maddubs 路径。 */
+static inline void gemv_w(float* y, const float* x, const GW* W) {
+    if (W->is_q4)
+        sn_gemv_i4(y, x, W->q, W->scale, W->in, W->out, SN_GLA_BLOCK);
+    else
+        gemv(y, x, W->w, W->in, W->out);
 }
 
 static void rms_norm(float* y, const float* x, const float* g, int n, float eps) {
@@ -151,6 +172,35 @@ static const float* take_f32(Cur* c, size_t n) {
     return r;
 }
 
+/* 带标签的 GEMV 矩阵. 标签 1: INT4 = q(out,in/2 字节) + scale(out,in/block);
+ * 标签 0: fp32 (out,in). 仅 Q4 magic 的文件有标签, fp32 文件仍是无标签的裸流。
+ * in 不满足 block 时导出器已回落 fp32, 这里按标签自然处理。 */
+static void take_mat(Cur* c, GW* W, int in, int out, int tagged) {
+    W->in = in;
+    W->out = out;
+    W->w = NULL;
+    W->q = NULL;
+    W->scale = NULL;
+    W->is_q4 = 0;
+    int tag = 0;
+    if (tagged) {
+        memcpy(&tag, c->p, sizeof(int));
+        c->p += sizeof(int);
+    }
+    if (tag == 1) {
+        const size_t qb = (size_t)out * (size_t)(in / 2);
+        const size_t sb = (size_t)out * (size_t)(in / SN_GLA_BLOCK) * sizeof(float);
+        W->is_q4 = 1;
+        W->q = c->p;
+        c->p += qb;
+        W->scale = (const float*)c->p;
+        c->p += sb;
+    } else {
+        W->w = (const float*)c->p;
+        c->p += (size_t)in * out * sizeof(float);
+    }
+}
+
 static int rd_i32(FILE* f, int32_t* o, int n) {
     return (int)fread(o, sizeof(int32_t), (size_t)n, f) == n;
 }
@@ -159,10 +209,13 @@ SnGLA* sn_gla_load(const char* path) {
     FILE* f = sn_fopen(path, "rb");
     if (!f) return NULL;
     int32_t h[8];
-    if (!rd_i32(f, h, 8) || h[0] != SN_GLA_MAGIC || h[1] != SN_GLA_VERSION) {
+    if (!rd_i32(f, h, 8)
+        || (h[0] != SN_GLA_MAGIC && h[0] != SN_GLA_MAGIC_Q4)
+        || h[1] != SN_GLA_VERSION) {
         fclose(f);
         return NULL;
     }
+    const int tagged = (h[0] == SN_GLA_MAGIC_Q4);
     const int L = h[2], D = h[3], NH = h[4], HK = h[5], HV = h[6], GR = h[7];
     float hf[4];
     if (fread(hf, sizeof(float), 4, f) != 4) { fclose(f); return NULL; }
@@ -197,23 +250,28 @@ SnGLA* sn_gla_load(const char* path) {
         A->eps = m->eps; A->scale = m->scale; A->gnorm = m->gnorm;
         /* 顺序由导出器 _export_gla.py 决定, 两处必须同步改 */
         A->an = take_f32(&c, D);
-        A->qp = take_f32(&c, (size_t)m->KD * D);
-        A->kp = take_f32(&c, (size_t)m->KD * D);
-        A->vp = take_f32(&c, (size_t)m->VD * D);
-        A->op = take_f32(&c, (size_t)D * m->VD);
-        A->g0 = take_f32(&c, (size_t)GR * D);
-        A->g1w = take_f32(&c, (size_t)m->KD * GR);
+        take_mat(&c, &A->qp, D, m->KD, tagged);
+        take_mat(&c, &A->kp, D, m->KD, tagged);
+        take_mat(&c, &A->vp, D, m->VD, tagged);
+        take_mat(&c, &A->op, m->VD, D, tagged);
+        take_mat(&c, &A->g0, D, GR, tagged);
+        take_mat(&c, &A->g1w, GR, m->KD, tagged);
         A->g1b = take_f32(&c, m->KD);
-        A->gp = take_f32(&c, (size_t)m->VD * D);
+        take_mat(&c, &A->gp, D, m->VD, tagged);
         A->gn = take_f32(&c, HV);
         A->mn = take_f32(&c, D);
-        A->mgp = take_f32(&c, (size_t)m->F * D);
-        A->mup = take_f32(&c, (size_t)m->F * D);
-        A->mdp = take_f32(&c, (size_t)D * m->F);
+        take_mat(&c, &A->mgp, D, m->F, tagged);
+        take_mat(&c, &A->mup, D, m->F, tagged);
+        take_mat(&c, &A->mdp, m->F, D, tagged);
     }
     m->embed = take_f32(&c, (size_t)m->vocab * D);
     m->ln_f = take_f32(&c, D);
-    m->head = m->tied_head ? NULL : take_f32(&c, (size_t)m->vocab * D);
+    if (!m->tied_head)
+        take_mat(&c, &m->head, D, m->vocab, tagged);
+    else {
+        m->head.w = NULL; m->head.q = NULL; m->head.scale = NULL;
+        m->head.is_q4 = 0; m->head.in = D; m->head.out = m->vocab;
+    }
 
     for (int l = 0; l < L; ++l) {
         SnLayer* A = &m->layers[l];
@@ -276,13 +334,13 @@ static void gla_layer(SnLayer* A, float* x) {
     float* mu = mg + F;
 
     rms_norm(h, x, A->an, D, A->eps);
-    gemv(q, h, A->qp, D, KD);
-    gemv(k, h, A->kp, D, KD);
-    gemv(v, h, A->vp, D, VD);
-    gemv(gg, h, A->gp, D, VD);
+    gemv_w(q, h, &A->qp);
+    gemv_w(k, h, &A->kp);
+    gemv_w(v, h, &A->vp);
+    gemv_w(gg, h, &A->gp);
     /* gk = logsigmoid(W1 (W0 h) + b) / normalizer, 逐 key 维 */
-    gemv(gk2, h, A->g0, D, GR);
-    gemv(gk, gk2, A->g1w, GR, KD);
+    gemv_w(gk2, h, &A->g0);
+    gemv_w(gk, gk2, &A->g1w);
     const float inv = 1.0f / A->gnorm;
     for (int i = 0; i < KD; ++i) {
         float g = logsigmoid(gk[i] + A->g1b[i]) * inv;
@@ -306,15 +364,15 @@ static void gla_layer(SnLayer* A, float* x) {
     probe_dump(A->m, 7, o, VD);     /* RMSNorm 之后 */
     for (int i = 0; i < VD; ++i) o[i] *= silu(gg[i]);
     probe_dump(A->m, 8, o, VD);     /* 门之后 */
-    gemv(h, o, A->op, VD, D);
+    gemv_w(h, o, &A->op);
     probe_dump(A->m, 9, h, D);      /* o_proj 输出 */
     for (int i = 0; i < D; ++i) x[i] += h[i];
 
     rms_norm(h, x, A->mn, D, A->eps);
-    gemv(mg, h, A->mgp, D, F);
-    gemv(mu, h, A->mup, D, F);
+    gemv_w(mg, h, &A->mgp);
+    gemv_w(mu, h, &A->mup);
     for (int i = 0; i < F; ++i) mg[i] = silu(mg[i]) * mu[i];
-    gemv(h, mg, A->mdp, F, D);
+    gemv_w(h, mg, &A->mdp);
     for (int i = 0; i < D; ++i) x[i] += h[i];
 }
 
@@ -324,7 +382,10 @@ static void gla_forward(SnGLA* m, int token, float* logits) {
     memcpy(x, m->embed + (size_t)token * D, (size_t)D * sizeof(float));
     for (int l = 0; l < m->L; ++l) gla_layer(&m->layers[l], x);
     rms_norm(x, x, m->ln_f, D, m->eps);
-    gemv(logits, x, m->head ? m->head : m->embed, D, m->vocab);
+    if (m->head.w || m->head.is_q4)
+        gemv_w(logits, x, &m->head);
+    else
+        gemv(logits, x, m->embed, D, m->vocab);   /* tied: 复用嵌入表 */
 }
 
 void sn_gla_step(SnGLA* m, int token, float* logits) {
