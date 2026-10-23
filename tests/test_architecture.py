@@ -423,8 +423,104 @@ def test_feedback_is_causal():
     assert float((a[:, 64:] - b[:, 64:]).abs().max()) > 1e-4
 
 
-# ---------------------------------------------------------------- 参数/基线
-def test_param_count_reported():
+# ---------------------------------------------------------------- 关联记忆
+ASSOC = {"assoc": True, "assoc_slots": 32, "assoc_m": 16}
+
+
+def test_assoc_off_is_bit_identical():
+    """关闭关联记忆时输出与既有路径逐位相同 (回归防线)."""
+    torch.manual_seed(61)
+    cfg = SunnyConfig.small(512)
+    m = SunnyNet(cfg).double().eval()
+    assert m.blocks[0].assoc is None
+    idx = torch.randint(0, 512, (2, 64))
+    with torch.no_grad():
+        o, st = m(idx, return_state=True)
+    assert st.mem is None
+    assert torch.isfinite(o).all()
+
+
+def test_assoc_state_bounded():
+    """关联记忆的凸组合注入必须有界: |S| <= max(|S0|, |v⊗k|)."""
+    torch.manual_seed(62)
+    cfg = SunnyConfig(vocab_size=512, dim=64, inner=96, rank=32, layers=3,
+                      ablation=dict(ASSOC))
+    m = SunnyNet(cfg)
+    idx = torch.randint(0, 512, (4, 400))
+    with torch.no_grad():
+        _, st = m(idx, return_state=True)
+    assert st.mem is not None
+    assert torch.isfinite(st.mem).all()
+    assert st.mem.abs().max() < 50, f"关联记忆发散: {st.mem.abs().max()}"
+
+
+def test_assoc_forward_step_matches_forward_fp64():
+    """关联记忆开启时, 单步自回归与整段前向仍须 fp64 严格一致."""
+    torch.manual_seed(63)
+    cfg = SunnyConfig(vocab_size=512, dim=64, inner=96, rank=32, layers=3,
+                      ablation=dict(ASSOC))
+    m = SunnyNet(cfg).double().eval()
+    idx = torch.randint(0, 512, (1, 64))
+    with torch.no_grad():
+        full, _ = m(idx, return_state=True)
+        st = m.init_state(1, dtype=torch.float64)
+        assert st.mem is not None
+        outs = []
+        for t in range(idx.shape[1]):
+            lg, st = m.forward_step(idx[:, t], st)
+            outs.append(lg)
+        step = torch.stack(outs, dim=1)
+    d = float((step - full).abs().max())
+    assert d < 1e-10, f"关联记忆单步与整段不一致 max diff={d}"
+
+
+def test_assoc_chunk_invariance():
+    """关联记忆扫描在任意 chunk 下输出必须一致."""
+    torch.manual_seed(64)
+    cfg = SunnyConfig(vocab_size=256, dim=64, inner=96, rank=32, layers=2,
+                      ablation=dict(ASSOC))
+    m = SunnyNet(cfg).eval()
+    idx = torch.randint(0, 256, (2, 130))
+    with torch.no_grad():
+        a = m(idx)
+    for blk in m.blocks:
+        blk.scan_chunk = 1
+    with torch.no_grad():
+        b = m(idx)
+    assert float((a - b).abs().max()) < 1e-5, "关联记忆分块一致性失败"
+
+
+def test_assoc_causal_no_future_leak():
+    """关联记忆不得引入未来信息泄漏."""
+    torch.manual_seed(65)
+    cfg = SunnyConfig(vocab_size=512, dim=64, inner=96, rank=32, layers=2,
+                      ablation=dict(ASSOC))
+    m = SunnyNet(cfg).eval()
+    idx = torch.randint(0, 512, (1, 128))
+    k = 64
+    idx2 = idx.clone()
+    idx2[0, k:] = torch.randint(0, 512, (128 - k,))
+    with torch.no_grad():
+        o1 = m(idx)
+        o2 = m(idx2)
+    assert torch.allclose(o1[:, :k], o2[:, :k], atol=1e-6), "关联记忆破坏因果性"
+
+
+def test_assoc_gradients_finite():
+    """关联记忆开启时全部参数梯度有限且非零."""
+    torch.manual_seed(66)
+    cfg = SunnyConfig(vocab_size=512, dim=64, inner=96, rank=32, layers=3,
+                      ablation=dict(ASSOC))
+    m = SunnyNet(cfg)
+    idx = torch.randint(0, 512, (2, 128))
+    loss = torch.nn.functional.cross_entropy(m(idx).reshape(-1, 512), idx.reshape(-1))
+    loss.backward()
+    g = m.blocks[0].assoc.W_k.weight.grad
+    assert g is not None and torch.isfinite(g).all()
+    assert g.abs().max() > 1e-12, "关联记忆梯度消失"
+    for p in m.parameters():
+        if p.grad is not None:
+            assert torch.isfinite(p.grad).all()
     cfg = SunnyConfig.small(512)
     m = SunnyNet(cfg)
     total = sum(p.numel() for p in m.parameters())

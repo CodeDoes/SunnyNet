@@ -44,7 +44,20 @@ def main():
     ap.add_argument("--T", type=int, default=256)
     ap.add_argument("--n-in", type=int, default=16)
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--ablation", default="",
+                    help='如 "assoc=1,assoc_slots=32,assoc_m=16"')
     args = ap.parse_args()
+
+    ablation = {}
+    if args.ablation:
+        for kv in args.ablation.split(","):
+            k, v = kv.split("=")
+            try:
+                iv = int(v)
+            except ValueError:
+                ablation[k] = v
+            else:
+                ablation[k] = bool(iv) if iv in (0, 1) else iv
 
     torch.set_num_threads(6)
     from train.train import _preset_cfg, build_models, lr_at
@@ -53,6 +66,8 @@ def main():
     tr, _ = load(args.domain)
     cfg = _preset_cfg(args.preset, VOCAB)
     cfg.scan_chunk = 64
+    if ablation:
+        cfg.ablation = dict(ablation)
     model = SunnyNet(cfg)
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
@@ -79,9 +94,17 @@ def main():
         per_layer = []
         s = torch.zeros(args.n_in, cfg.layers, cfg.dim)
         hist = torch.zeros(args.n_in, cfg.layers, max(0, cfg.taps - 1), cfg.dim)
+        use_mem = model.blocks[0].assoc is not None
+        if use_mem:
+            a0 = model.blocks[0].assoc
+            mem = torch.zeros(args.n_in, cfg.layers, a0.slots, a0.m)
         h = model.embed(xs)
         for li, blk in enumerate(model.blocks):
-            h, s_i, h_i = blk(h, s[:, li], hist[:, li])
+            if use_mem:
+                h, s_i, h_i, m_i = blk(h, s[:, li], hist[:, li], mem[:, li])
+                mem[:, li] = m_i
+            else:
+                h, s_i, h_i = blk(h, s[:, li], hist[:, li])
             s[:, li] = s_i
             hist[:, li] = h_i
             per_layer.append(s[:, li].clone())          # (n_in, dim)

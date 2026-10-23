@@ -223,7 +223,12 @@ def main():
     if args.ablation:
         for kv in args.ablation.split(","):
             k, v = kv.split("=")
-            ablation[k] = bool(int(v))
+            try:
+                iv = int(v)
+            except ValueError:
+                ablation[k] = v
+            else:
+                ablation[k] = bool(iv) if iv in (0, 1) else iv
 
     tk = load_tokenizer()
     vocab = tk.vocab_size

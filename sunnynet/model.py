@@ -81,10 +81,17 @@ class SunnyNet(nn.Module):
 
     def init_state(self, batch: int, device=None, dtype=torch.float32) -> SunnyState:
         k = max(0, self.cfg.taps - 1)
+        mem = None
+        for blk in self.blocks:
+            if blk.assoc is not None:
+                mem = torch.zeros(batch, self.cfg.layers, blk.assoc.slots,
+                                  blk.assoc.m, device=device, dtype=dtype)
+                break
         return SunnyState(
             s=torch.zeros(batch, self.cfg.layers, self.cfg.dim, device=device, dtype=dtype),
             hist=torch.zeros(batch, self.cfg.layers, k, self.cfg.dim,
-                             device=device, dtype=dtype))
+                             device=device, dtype=dtype),
+            mem=mem)
 
     def forward(self, idx: torch.Tensor, state: SunnyState | None = None,
                 return_state: bool = False):
@@ -92,22 +99,34 @@ class SunnyNet(nn.Module):
         B, T = idx.shape
         x = self.embed(idx)
         k = max(0, self.cfg.taps - 1)
+        use_mem = self.blocks[0].assoc is not None
         if state is None:
             s = torch.zeros(B, self.cfg.layers, self.cfg.dim, device=idx.device, dtype=x.dtype)
             hist = torch.zeros(B, self.cfg.layers, k, self.cfg.dim,
                                device=idx.device, dtype=x.dtype)
+            mem = None
+            if use_mem:
+                s0, m0 = self.blocks[0].assoc.slots, self.blocks[0].assoc.m
+                mem = torch.zeros(B, self.cfg.layers, s0, m0,
+                                  device=idx.device, dtype=x.dtype)
         else:
-            s, hist = state.s, state.hist
+            s, hist, mem = state.s, state.hist, state.mem
         ns = torch.empty_like(s) if return_state else None
         nh = torch.empty_like(hist) if return_state else None
+        nm = torch.empty_like(mem) if (return_state and use_mem) else None
         for i, blk in enumerate(self.blocks):
-            x, s_i, h_i = blk(x, s[:, i], hist[:, i])
+            if use_mem:
+                x, s_i, h_i, m_i = blk(x, s[:, i], hist[:, i], mem[:, i])
+                if return_state:
+                    nm[:, i] = m_i
+            else:
+                x, s_i, h_i = blk(x, s[:, i], hist[:, i])
             if return_state:
                 ns[:, i] = s_i
                 nh[:, i] = h_i
         logits = self.head(self.norm_out(x))
         if return_state:
-            return logits, SunnyState(ns, nh)
+            return logits, SunnyState(ns, nh, nm)
         return logits
 
     @torch.no_grad()
@@ -116,12 +135,19 @@ class SunnyNet(nn.Module):
         x = self.embed(idx_t)
         ns = torch.empty_like(state.s)
         nh = torch.empty_like(state.hist)
+        use_mem = self.blocks[0].assoc is not None
+        nm = torch.empty_like(state.mem) if use_mem else None
         for i, blk in enumerate(self.blocks):
-            x, s_i, h_i = blk.step(x, state.s[:, i], state.hist[:, i])
+            if use_mem:
+                x, s_i, h_i, m_i = blk.step(x, state.s[:, i], state.hist[:, i],
+                                            state.mem[:, i])
+                nm[:, i] = m_i
+            else:
+                x, s_i, h_i = blk.step(x, state.s[:, i], state.hist[:, i])
             ns[:, i] = s_i
             nh[:, i] = h_i
         logits = self.head(self.norm_out(x))
-        return logits, SunnyState(ns, nh)
+        return logits, SunnyState(ns, nh, nm)
 
     def state_dict_for_inference(self, batch: int, device=None, dtype=torch.float32):
         return self.init_state(batch, device, dtype)

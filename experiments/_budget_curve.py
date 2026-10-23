@@ -48,7 +48,20 @@ def main():
     ap.add_argument("--B", type=int, default=8)
     ap.add_argument("--T", type=int, default=512)
     ap.add_argument("--lr", type=float, default=3e-3)
+    ap.add_argument("--ablation", default="",
+                    help='如 "assoc=1,assoc_slots=32,assoc_m=16"')
     args = ap.parse_args()
+
+    ablation = {}
+    if args.ablation:
+        for kv in args.ablation.split(","):
+            k, v = kv.split("=")
+            try:
+                iv = int(v)
+            except ValueError:
+                ablation[k] = v
+            else:
+                ablation[k] = bool(iv) if iv in (0, 1) else iv
 
     torch.set_num_threads(6)
     from train.train import build_models, lr_at
@@ -56,7 +69,8 @@ def main():
     n_tok = int(args.tokens * 1e6)
     steps = n_tok // (args.B * args.T)
 
-    sunny, base, cfg = build_models(args.arch, VOCAB, args.preset, None, args.T, 1234)
+    sunny, base, cfg = build_models(args.arch, VOCAB, args.preset, ablation,
+                                    args.T, 1234)
     model = sunny if args.arch == "sunnynet" else base
     opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
 
@@ -89,6 +103,7 @@ def main():
     dt = time.perf_counter() - t0
 
     print(json.dumps({"arch": args.arch, "preset": args.preset, "domain": args.domain,
+                      "ablation": ablation, "params": model.num_params(),
                       "steps": steps, "tokens": steps * args.B * args.T,
                       "wall_s": round(dt, 1), "ms_token": round(dt * 1000 / (steps * args.B * args.T), 4),
                       "marks": marks}, ensure_ascii=False))

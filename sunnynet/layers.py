@@ -15,19 +15,27 @@ from .init import orthogonal_spectrum_
 from .kernels.core_auto import core_forward, dw_step, kernel_active, step_core
 from .ops import CenteredScaleNorm, horizon_logit, logspace_scan
 
-__all__ = ["StateCirculant", "DepthwiseCausal", "SunnyBlock", "SunnyState"]
+__all__ = ["StateCirculant", "DepthwiseCausal", "AssocMemory", "SunnyBlock",
+           "SunnyState"]
 
 
 @dataclass
 class SunnyState:
-    """跨块/跨层的完整状态: 逐块滚动状态 + 逐块因果卷积历史."""
+    """跨块/跨层的完整状态: 逐块滚动状态 + 逐块因果卷积历史 + 关联记忆.
+
+    mem 仅在开启关联记忆时非空, 形状 (B,L,H,m,m); 关闭时为 None, 旧的
+    两字段构造方式保持可用.
+    """
 
     s: torch.Tensor
     hist: torch.Tensor
+    mem: torch.Tensor | None = None
 
     def to(self, device=None, dtype=None):
         return SunnyState(self.s.to(device=device, dtype=dtype),
-                          self.hist.to(device=device, dtype=dtype))
+                          self.hist.to(device=device, dtype=dtype),
+                          None if self.mem is None
+                          else self.mem.to(device=device, dtype=dtype))
 
 
 class StateCirculant(nn.Module):
@@ -82,6 +90,81 @@ def _pick_group(dim: int, requested: int) -> int:
     return dim
 
 
+class AssocMemory(nn.Module):
+    """固定宽度的矩阵值关联记忆: S (B,H,slots,m), 凸组合递推, 读出 o = S^T q.
+
+    形状是关键决策. 逐 head 全宽 (H*m*m = D^2/H) 会随模型维度平方增长 ——
+    实测 dim 64/128/256 的训练步倍数 6.9x/8.7x/16.5x, 在生产宽度直接毁掉
+    CPU 速度. 因此这里用**固定的** slots × m 预算, 与 dim 解耦:
+    容量随 dim 不变, 成本随 dim 不变, 只额外提供一块专用关联记忆.
+
+        S_t = p ⊙ S_{t-1} + (1-p) ⊙ (v_t ⊗ k_t),    o_t = W_o(S_t^T q_t)
+
+    凸组合 (注入乘 1-p) 使 |S| <= max(|S_0|, |v⊗k|) 恒成立, 且能整段分块扫描;
+    逐 token 串行的 delta rule 会毁掉 O(N) 并行优势.
+
+    slots 是 key 侧维度 (记忆槽数), m 是 value 侧维度 (每槽存多少分量);
+    读写投影把 dim 映射到这对固定宽度.
+    """
+
+    def __init__(self, dim: int, slots: int = 128, m: int = 64,
+                 h_min: float = 2.0, h_max: float = 8192.0, generator=None):
+        super().__init__()
+        self.dim = dim
+        self.slots = slots
+        self.m = m
+        self.W_k = nn.Linear(dim, slots, bias=False)
+        self.W_v = nn.Linear(dim, m, bias=False)
+        self.W_q = nn.Linear(dim, slots, bias=False)
+        self.W_o = nn.Linear(m, dim, bias=False)
+        self.W_g = nn.Linear(dim, m, bias=False)
+        self.norm = CenteredScaleNorm(dim)
+        self.h_min, self.h_max = h_min, h_max
+        self.register_buffer("delta_min", torch.tensor(1.0 / h_max), persistent=True)
+        nn.init.zeros_(self.W_g.weight)
+        for w in (self.W_k, self.W_v, self.W_q, self.W_o):
+            orthogonal_spectrum_(w.weight, 0.7, generator)
+
+    def delta(self, x: torch.Tensor) -> torch.Tensor:
+        """逐 value 通道遗忘上界 delta = 1/H (B,T,m)."""
+        span = math.log(self.h_max / self.h_min)
+        g = self.W_g(x)
+        H = self.h_min * torch.exp(span * torch.sigmoid(g))
+        return 1.0 / H
+
+    def _kvq(self, x: torch.Tensor):
+        k = torch.nn.functional.normalize(self.W_k(x), dim=-1)     # (B,T,slots)
+        v = self.W_v(x)                                            # (B,T,m)
+        q = torch.nn.functional.normalize(self.W_q(x), dim=-1)     # (B,T,slots)
+        return k, v, q
+
+    def forward(self, x: torch.Tensor, mem: torch.Tensor, chunk: int = 64):
+        """x (B,T,D) + mem (B,slots,m) -> (out (B,T,D), mem_T (B,slots,m))."""
+        B, T, D = x.shape
+        S0, M = self.slots, self.m
+        k, v, q = self._kvq(x)
+        inj = (v.unsqueeze(-2) * k.unsqueeze(-1)).reshape(B, T, S0 * M)   # (B,T,S0,m)
+        p = 1.0 - self.delta(x)                                          # (B,T,m)
+        p_full = p.unsqueeze(-2).expand(B, T, S0, M).reshape(B, T, S0 * M)
+        flat, mem_T = logspace_scan(inj, p_full, mem.reshape(B, S0 * M),
+                                    chunk=chunk, p_min_hint=1.0 - 1.0 / self.h_min)
+        S = flat.reshape(B, T, S0, M)
+        o = torch.einsum("btsm,bts->btm", S, q)
+        return self.norm(self.W_o(o)), mem_T.reshape(B, S0, M)
+
+    def step(self, x_t: torch.Tensor, mem: torch.Tensor):
+        """x_t (B,D) + mem (B,slots,m) -> (out (B,D), mem_new (B,slots,m))."""
+        S0, M = self.slots, self.m
+        B = x_t.shape[0]
+        k, v, q = self._kvq(x_t[:, None, :])
+        k, v, q = k[:, 0], v[:, 0], q[:, 0]                       # (B,S0),(B,m),(B,S0)
+        p = 1.0 - self.delta(x_t[:, None, :])[:, 0]               # (B,m)
+        inj = v.unsqueeze(-2) * k.unsqueeze(-1)                   # (B,S0,m)
+        mem_new = p.unsqueeze(-2) * mem + (1.0 - p).unsqueeze(-2) * inj
+        o = torch.einsum("bsm,bs->bm", mem_new, q)
+        return self.norm(self.W_o(o)), mem_new
+
+
 class SunnyBlock(nn.Module):
     """SunnyNet 单块."""
 
@@ -102,6 +185,10 @@ class SunnyBlock(nn.Module):
         self.use_residual = ab.get("residual", True)
         self.use_state_norm = ab.get("state_norm", False)
         self.use_state_mul = ab.get("state_mul", False)
+        self.n_heads = int(ab.get("assoc_heads", 4))
+        self.assoc_slots = int(ab.get("assoc_slots", 128))
+        self.assoc_m = int(ab.get("assoc_m", 64))
+        self.use_assoc = bool(ab.get("assoc", False))
 
         self.norm_in = CenteredScaleNorm(dim)
         self.norm_mix = CenteredScaleNorm(inner)
@@ -114,6 +201,12 @@ class SunnyBlock(nn.Module):
         self.W_z = nn.Linear(dim, inner, bias=False)
         self.W_c = nn.Linear(inner, dim, bias=False)
         self.W_s = nn.Linear(dim, dim, bias=False)
+        self.assoc = (AssocMemory(dim, self.assoc_slots, self.assoc_m,
+                                  h_min=h_min, h_max=h_max, generator=generator)
+                      if self.use_assoc else None)
+        self.W_a = nn.Linear(dim, dim, bias=False) if self.use_assoc else None
+        if self.W_a is not None:
+            orthogonal_spectrum_(self.W_a.weight, 0.5, generator)
 
         self.a = nn.Parameter(torch.tensor(0.5))
         self.b_gain = nn.Parameter(torch.tensor(0.5))
@@ -253,10 +346,12 @@ class SunnyBlock(nn.Module):
             core = core + self.W_g(y) * sn
         return core
 
-    def forward(self, x: torch.Tensor, s: torch.Tensor, hist: torch.Tensor):
-        """x (B,T,D) -> (out, s_T, hist_new).
+    def forward(self, x: torch.Tensor, s: torch.Tensor, hist: torch.Tensor,
+                mem: torch.Tensor | None = None):
+        """x (B,T,D) -> (out, s_T, hist_new) 或开启关联记忆时附 mem_T.
 
         T 会 pad 到整除 chunk, 返回状态取自位置 T-1 而非 padding 位置.
+        关联记忆在未 padding 的信号上单独扫描, 不经主扫描的 pad 路径.
         """
         B, T, D = x.shape
         raw = self.norm_in(x)
@@ -282,10 +377,14 @@ class SunnyBlock(nn.Module):
             states = states[:, :T]
         if self.use_residual:
             out = out + x
-        return out, states[:, -1], hist_new
+        if self.assoc is None:
+            return out, states[:, -1], hist_new
+        aout, mem_T = self.assoc(a, mem, chunk=self.scan_chunk)
+        return out + self.W_a(aout), states[:, -1], hist_new, mem_T
 
-    def step(self, x_t: torch.Tensor, s: torch.Tensor, hist: torch.Tensor):
-        """单步: x_t (B,D) -> (out (B,D), s' (B,D), hist_new (B,k-1,D))."""
+    def step(self, x_t: torch.Tensor, s: torch.Tensor, hist: torch.Tensor,
+             mem: torch.Tensor | None = None):
+        """单步: x_t (B,D) -> (out, s', hist') 或开启关联记忆时附 mem'."""
         raw = self.norm_in(x_t)
         k = max(0, self.taps - 1)
         use_k = (kernel_active() and self.group == 8 and not self._need_clamp
@@ -323,4 +422,7 @@ class SunnyBlock(nn.Module):
             out = out + self.W_g(y) * sn
         if self.use_residual:
             out = out + x_t
-        return out, s_new, hist_new
+        if self.assoc is None:
+            return out, s_new, hist_new
+        aout, mem_new = self.assoc.step(a_t, mem)
+        return out + self.W_a(aout), s_new, hist_new, mem_new
