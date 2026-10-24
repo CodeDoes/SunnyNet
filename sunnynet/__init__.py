@@ -1,7 +1,7 @@
 """SunnyNet: 原创 CPU 通用序列神经网络架构."""
 import importlib
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 __all__ = ["SunnyConfig", "SunnyNet", "CenteredScaleNorm", "logspace_scan",
            "poly_sigmoid", "softwedge"]
 

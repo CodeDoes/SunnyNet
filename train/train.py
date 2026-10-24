@@ -109,6 +109,11 @@ def _preset_cfg(preset: str, vocab: int) -> SunnyConfig:
     if preset == "p100mw":
         return SunnyConfig(vocab_size=vocab, dim=1408, inner=1920, rank=1024,
                            layers=8, h_max=16384.0)
+    if preset == "p100msw":
+        # 同栈参数 (93.83M, +0.68%) 下减层加宽: L8->L6, d1408->d1536.
+        # 每层一笔固定算子派发税 (~1100 次调用/步), 深度在速度与质量两条轴上都不划算.
+        return SunnyConfig(vocab_size=vocab, dim=1536, inner=2624, rank=1152,
+                           layers=6, h_max=16384.0)
     if preset == "deepl6":
         return SunnyConfig.deepl6(vocab)
     if preset == "deepl8":
@@ -175,7 +180,7 @@ def evaluate(model, batches, device="cpu") -> float:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--arch", choices=ARCH_CHOICES, default="sunnynet")
-    ap.add_argument("--preset", choices=["small", "smalln", "smalln88", "smalln80", "deepl6", "deepl8", "proto20m", "proto20mw", "p100m", "p100mw"],
+    ap.add_argument("--preset", choices=["small", "smalln", "smalln88", "smalln80", "deepl6", "deepl8", "proto20m", "proto20mw", "p100m", "p100mw", "p100msw"],
                     default="small")
     ap.add_argument("--steps", type=int, default=300)
     ap.add_argument("--batch-size", type=int, default=8)
