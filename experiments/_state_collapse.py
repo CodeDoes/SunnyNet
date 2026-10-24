@@ -90,17 +90,17 @@ def main():
     xs = torch.stack([tr[s:s + T] for s in starts])
 
     with torch.no_grad():
-        # 逐层状态: 复用块接口收集
+        # 逐层状态 + 残差流: 复用块接口收集
         per_layer = []
+        h_layer = [model.embed(xs).mean(dim=1)]
         s = torch.zeros(args.n_in, cfg.layers, cfg.dim)
         hist = torch.zeros(args.n_in, cfg.layers, max(0, cfg.taps - 1), cfg.dim)
-        use_mem = model.blocks[0].assoc is not None
-        if use_mem:
-            a0 = model.blocks[0].assoc
-            mem = torch.zeros(args.n_in, cfg.layers, a0.slots, a0.m)
+        a0 = next((b.assoc for b in model.blocks if b.assoc is not None), None)
+        mem = (torch.zeros(args.n_in, cfg.layers, a0.slots, a0.m)
+               if a0 is not None else None)
         h = model.embed(xs)
         for li, blk in enumerate(model.blocks):
-            if use_mem:
+            if blk.assoc is not None:
                 h, s_i, h_i, m_i = blk(h, s[:, li], hist[:, li], mem[:, li])
                 mem[:, li] = m_i
             else:
@@ -108,7 +108,10 @@ def main():
             s[:, li] = s_i
             hist[:, li] = h_i
             per_layer.append(s[:, li].clone())          # (n_in, dim)
+            h_layer.append(h.mean(dim=1).clone())        # 残差流时间平均 (n_in, dim)
         last_state = per_layer[-1]
+        trained_logits = model.head(model.norm_out(h))   # (n_in, T, V)
+        tl = trained_logits[:, -1]
 
     def pair_cos(mat):
         v = mat / mat.norm(dim=-1, keepdim=True).clamp_min(1e-9)
@@ -118,7 +121,24 @@ def main():
         return float(c[iu[0], iu[1]].mean())
 
     layer_cos = [round(pair_cos(p), 4) for p in per_layer]
+    h_cos = [round(pair_cos(p), 4) for p in h_layer]
     sc = pair_cos(last_state)
+    tl_cos = pair_cos(tl)
+    # 逐 token 位置的平均成对余弦 (残差流), 判断坍缩是逐 token 全局还是仅在末端
+    with torch.no_grad():
+        hh = model.embed(xs)
+        h_all = []
+        for li, blk in enumerate(model.blocks):
+            if blk.assoc is not None:
+                hh, _, _, _ = blk(hh, torch.zeros_like(s[:, li]),
+                                  torch.zeros_like(hist[:, li]),
+                                  torch.zeros_like(mem[:, li]))
+            else:
+                hh, _, _ = blk(hh, torch.zeros_like(s[:, li]),
+                               torch.zeros_like(hist[:, li]))
+            h_all.append(hh.clone())
+        h_pos_cos = [round(pair_cos(h_all[-1][:, p]), 4)
+                     for p in (0, args.T // 2, args.T - 1)]
 
     # 敏感度: 两个不同输入的状态相对差
     diff = (last_state[0] - last_state[1]).norm() / last_state[0].norm().clamp_min(1e-9)
@@ -137,7 +157,10 @@ def main():
     print(json.dumps({
         "preset": args.preset, "domain": args.domain, "steps": args.steps,
         "layer_pair_cos": layer_cos,
+        "residual_layer_cos": h_cos,
+        "residual_pos_cos_last_layer": h_pos_cos,
         "last_state_pair_cos": round(sc, 4),
+        "trained_logit_cos": round(tl_cos, 4),
         "state_rel_diff_two_inputs": round(float(diff), 4),
         "random_init_logit_cos": round(rand_cos, 4),
     }, ensure_ascii=False))

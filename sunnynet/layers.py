@@ -185,10 +185,14 @@ class SunnyBlock(nn.Module):
         self.use_residual = ab.get("residual", True)
         self.use_state_norm = ab.get("state_norm", False)
         self.use_state_mul = ab.get("state_mul", False)
-        self.n_heads = int(ab.get("assoc_heads", 4))
         self.assoc_slots = int(ab.get("assoc_slots", 128))
         self.assoc_m = int(ab.get("assoc_m", 64))
-        self.use_assoc = bool(ab.get("assoc", False))
+        # assoc 的成本 ∝ state 宽度且只在能提供召回容量的层才有意义,
+        # 故支持按层启用: assoc_every=k 表示每 k 层开一个 (0/缺省 = 全开).
+        self.assoc_every = int(ab.get("assoc_every", 1))
+        self.use_assoc = (bool(ab.get("assoc", False))
+                          and (self.assoc_every <= 0
+                               or layer_index % max(1, self.assoc_every) == 0))
 
         self.norm_in = CenteredScaleNorm(dim)
         self.norm_mix = CenteredScaleNorm(inner)

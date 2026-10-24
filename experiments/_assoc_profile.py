@@ -36,6 +36,8 @@ def main():
     ap.add_argument("--B", type=int, default=32)
     ap.add_argument("--T", type=int, default=5)
     ap.add_argument("--vocab", type=int, default=64)
+    ap.add_argument("--slots", type=int, default=32)
+    ap.add_argument("--m", type=int, default=16)
     args = ap.parse_args()
     torch.set_num_threads(6)
 
@@ -46,7 +48,8 @@ def main():
     torch.manual_seed(0)
     m0 = SunnyNet(cfg_of({}))
     torch.manual_seed(0)
-    m1 = SunnyNet(cfg_of({"assoc": True, "assoc_heads": 4}))
+    m1 = SunnyNet(cfg_of({"assoc": True, "assoc_slots": args.slots,
+                          "assoc_m": args.m}))
     idx = torch.randint(0, args.vocab, (args.B, args.T))
     y = torch.randint(0, args.vocab, (args.B, args.T))
 
@@ -62,7 +65,7 @@ def main():
 
     blk = m1.blocks[0]
     a = blk.norm_in(m1.embed(idx))
-    mem = torch.zeros(args.B, blk.assoc.heads, blk.assoc.m, blk.assoc.m)
+    mem = torch.zeros(args.B, blk.assoc.slots, blk.assoc.m)
     t_assoc_fwd = bench(lambda: blk.assoc(a, mem))
     xa = a.detach().requires_grad_(True)
     memg = mem.detach().requires_grad_(True)
@@ -80,8 +83,8 @@ def main():
     print(f"  全模型 fwd+bwd  +关联 : {t_assoc:8.2f} ms   ({t_assoc/t_base:.2f}x)")
     print(f"  单块 assoc 前向       : {t_assoc_fwd:8.2f} ms")
     print(f"  单块 assoc 前向+反向  : {t_assoc_fb:8.2f} ms")
-    print(f"  状态维度: D={args.dim} -> H*m*m = "
-          f"{blk.assoc.heads * blk.assoc.m * blk.assoc.m}  ({blk.assoc.heads * blk.assoc.m * blk.assoc.m / args.dim:.0f}x)")
+    print(f"  状态维度: D={args.dim} -> slots*m = "
+          f"{blk.assoc.slots * blk.assoc.m}  ({blk.assoc.slots * blk.assoc.m / args.dim:.0f}x)")
 
 
 if __name__ == "__main__":

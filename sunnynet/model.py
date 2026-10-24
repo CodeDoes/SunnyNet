@@ -99,14 +99,15 @@ class SunnyNet(nn.Module):
         B, T = idx.shape
         x = self.embed(idx)
         k = max(0, self.cfg.taps - 1)
-        use_mem = self.blocks[0].assoc is not None
+        use_mem = any(blk.assoc is not None for blk in self.blocks)
         if state is None:
             s = torch.zeros(B, self.cfg.layers, self.cfg.dim, device=idx.device, dtype=x.dtype)
             hist = torch.zeros(B, self.cfg.layers, k, self.cfg.dim,
                                device=idx.device, dtype=x.dtype)
             mem = None
             if use_mem:
-                s0, m0 = self.blocks[0].assoc.slots, self.blocks[0].assoc.m
+                b0 = next(blk for blk in self.blocks if blk.assoc is not None)
+                s0, m0 = b0.assoc.slots, b0.assoc.m
                 mem = torch.zeros(B, self.cfg.layers, s0, m0,
                                   device=idx.device, dtype=x.dtype)
         else:
@@ -115,7 +116,7 @@ class SunnyNet(nn.Module):
         nh = torch.empty_like(hist) if return_state else None
         nm = torch.empty_like(mem) if (return_state and use_mem) else None
         for i, blk in enumerate(self.blocks):
-            if use_mem:
+            if blk.assoc is not None:
                 x, s_i, h_i, m_i = blk(x, s[:, i], hist[:, i], mem[:, i])
                 if return_state:
                     nm[:, i] = m_i
@@ -135,10 +136,10 @@ class SunnyNet(nn.Module):
         x = self.embed(idx_t)
         ns = torch.empty_like(state.s)
         nh = torch.empty_like(state.hist)
-        use_mem = self.blocks[0].assoc is not None
+        use_mem = any(blk.assoc is not None for blk in self.blocks)
         nm = torch.empty_like(state.mem) if use_mem else None
         for i, blk in enumerate(self.blocks):
-            if use_mem:
+            if blk.assoc is not None:
                 x, s_i, h_i, m_i = blk.step(x, state.s[:, i], state.hist[:, i],
                                             state.mem[:, i])
                 nm[:, i] = m_i

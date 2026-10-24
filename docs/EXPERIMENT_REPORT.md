@@ -3266,7 +3266,143 @@ capstone 5.0.7 确认生成 4-lane `fmla v3.4s, v2.4s, v4.4s` 及 `fmul`/`fsub`/
 
 ---
 
-## 26. 完整复现
+## 26. P0 关联记忆与状态坍缩（CPU 原生质量根因）
+
+`CPU_WAY_OUT.md` 判定："不连贯"有两个独立根因——训练预算不足，与元素级状态的
+召回容量上限。本节把两条都落到实测：给主状态加一条矩阵值关联记忆支路（召回容量），
+并度量层间状态累积（坍缩）。
+
+### 26.1 关联记忆的按层成本
+
+`AssocMemory` 的成本 ∝ 开启层数。扫 `assoc_every ∈ {关, 4, 3, 2, 1}`
+（small 预设 1.42M、$L$=4，`experiments/_assoc_layers.py`，3 轮独立子进程）：
+
+| 配置 | 开启层 | 参数 | 训练 ms | 倍率 | µs/token | 解码 ms | 倍率 |
+|---|---|---|---|---|---|---|---|
+| 关闭 | 0 | 1,414,420 | 225.4 | 1.00× | 110.1 | 3.99 | 1.00× |
+| 每 4 层 | 1 | 1,445,396 | 284.0 | 1.26× | 138.7 | 3.68 | 0.92× |
+| 每 2 层 | 2 | 1,476,372 | 329.9 | 1.46× | 161.1 | 4.66 | 1.17× |
+| 每层 | 4 | 1,538,324 | 434.9 | 1.93× | 212.4 | 6.16 | 1.54× |
+
+训练开销**约每层 +22%**（线性）；1 层的 `every4` 只 1.26×，且解码不劣化。
+
+### 26.2 召回容量对开启层数非单调
+
+`experiments/_assoc_recall_layers.py`（dim=64、$L$=4、1500 步、MQAR）：
+
+| 键对数 | 关闭 | 每 4 层 | 每 2 层 | 每层 |
+|---|---|---|---|---|
+| 2 | 0.984 | 0.977 | **0.988** | 0.977 |
+| 4 | 0.121 | 0.441 | **0.656** | 0.164 |
+| 8 | 0.047 | 0.070 | 0.027 | 0.074 |
+
+4 对键上**每 2 层（0.656）远优于每层（0.164）**，即全开又慢又差。
+⇒ 当前最优形态是**半量开启**。（1500 步未收敛，读作样本效率。）
+
+### 26.3 层间状态累积（坍缩）与关联记忆无关
+
+`experiments/_state_collapse.py`（small、zh_ancient、1200 步）：不同输入在**逐层状态**
+上的成对余弦：
+
+| 逐层余弦 | 层1 | 层2 | 层3 | 层4 | 末层 |
+|---|---|---|---|---|---|
+| 关闭 | 0.288 | 0.321 | 0.161 | 0.498 | 0.498 |
+| +关联记忆 | 0.232 | 0.353 | 0.473 | 0.495 | 0.495 |
+
+随机初始化基线 **0.004**。关联记忆**不缓解**坍缩（末层 0.495 vs 0.498）
+⇒ 坍缩与召回容量是两个独立问题，须另加"抗累积"手段。
+
+### 26.4 输出侧：公共分量主导，不能直接判"输出坍缩"
+
+`experiments/_output_collapse.py`（从收敛 checkpoint，32 个互不相同输入）：
+
+| 指标 | base | +关联(每层) | 随机初始化 |
+|---|---|---|---|
+| 末位 logit 成对余弦 | 0.98 | 0.96 | 0.006 |
+| **去均值后余弦** | **−0.03** | **−0.02** | — |
+| 公共分量能量占比 | **0.975** | 0.961 | — |
+| 32 输入的 argmax 去重数 | 27 | 26 | — |
+
+原始余弦 0.98 **约 97% 来自与输入无关的公共分量**（语言模型常见的 unigram 偏置）；
+去均值后余弦≈0，32 输入给出 27 个不同 argmax。**该项不可单独解读为"输出坍缩"**，
+必须与同规模对照模型比对。
+
+### 26.5 收敛态同预算对照：SunnyNet vs 关联记忆 vs Transformer
+
+四个模型全部训到 16000 步 × B8 × T256 = **32.8M token**（≈19.5 token/参数，
+Chinchilla 量级；zh_ancient 单域），栈参数对齐（≤±1%）、同 seed、同 lr 调度。
+评测用 `train/evaluate.py`。
+
+| 模型 | 栈参数 | zh_ancient ppl | en ppl | near 召回(1-gram) | 生成 |
+|---|---|---|---|---|---|
+| SunnyNet 基线 | 365,844 | 143.24 | 8798.69 | 0.023 | 句式可辨、语义漂移 |
+| +关联(每层) | 489,748 | 133.36 | 10922.02 | 0.019 | 不连贯 |
+| +关联(每 2 层) | 427,796 | 138.82 | 8008.08 | 0.019 | **古文句式连贯** |
+| Transformer | 369,200 | 140.40 | 71778.23 | 0.023 | — |
+
+**读数（口径纪律）**：
+
+- **SunnyNet 基线 vs Transformer 同预算同栈参数：ppl 143.24 vs 140.40**（差 2.0%），
+  near 召回均 0.023。两者**统计接近**，不是一方压倒。
+- **Transformer 在同预算下同样做不到长距召回**（near 0.023 = SunnyNet 基线）。
+  ⇒ "不连贯"**主要是 32.8M token 的规模/预算问题，不是 SunnyNet 独有**。
+- **关联记忆（每 2 层）把 zh ppl 从 143.24 降到 138.82**（−3.1%），
+  栈参数仅 +17%，是唯一改善生成连贯度的配置。
+- **输出侧诊断（`_output_collapse.py`）**：
+
+  | 指标 | SunnyNet 基线 | +关联(每层) | +关联(每 2 层) | Transformer |
+  |---|---|---|---|---|
+  | 末位 logit 余弦 | 0.98 | 0.96 | 0.94 | 0.973 |
+  | **去均值后余弦** | **−0.03** | **−0.02** | **−0.03** | **−0.031** |
+  | 公共分量占比 | 0.975 | 0.961 | 0.954 | 0.967 |
+
+  Transformer 的去均值余弦（−0.031）与公共分量占比（0.967）与 SunnyNet（−0.03 / 0.975）
+  **完全同量级** ⇒ 该现象是**所有架构在低预算下的共性**（unigram 偏置主导下一个巨大
+  公共 logit 分量），**不是 SunnyNet 架构缺陷**。此前把原始余弦 0.98 读作"输出坍缩"
+  是过强解读，已纠正。
+
+### 26.6 CPU 训练与推理速度的设备边界
+
+同一份 SunnyNet 代码在 CPU（i7-8750H / AVX2 / torch 2.14.1+cpu）与
+GPU（GTX 1060 6GB / torch 2.7.1+cu118）上跑（`experiments/_gpu_compare.py`，
+每格独立进程，GPU 侧同步计时）：
+
+| 预设 | T | CPU 前向 ms | GPU 前向 ms | 前向倍率 | CPU 训练步 ms | GPU 训练步 ms | 训练倍率 |
+|---|---|---|---|---|---|---|---|
+| small 1.4M | 512 | 138.8 | 17.4 | 7.97× | 569.9 | 57.5 | 9.92× |
+| small 1.4M | 1024 | 439.3 | 28.9 | 15.20× | 1186.3 | 99.0 | 11.99× |
+| proto20mw 16.8M | 512 | 1697.7 | 121.5 | 13.98× | 4620.8 | 384.6 | 12.02× |
+| proto20mw 16.8M | 1024 | 3308.5 | 244.4 | 13.54× | 9408.9 | 752.0 | 12.51× |
+
+**结论（口径纪律）**：
+
+- **CPU 训练达不到 GPU 速度**：同架构同代码，训练步落后 **9.9–12.5×**（前向 8.0–15.2×）。
+  这是硬件结构性差距（稠密 GEMM 效率 CPU/GPU ≈ 8.6×，见 `CPU_WAY_OUT.md` §1.2），
+  不是实现问题。**"CPU 达到 GPU 速度"在稠密训练上不成立**，如实记录。
+- **CPU 胜 GPU 的唯一已证区间**：B=1 长上下文单序列解码（`CPU_WAY_OUT.md` §4），
+  交点 T≈2048，T=8192 时 CPU 快 2.97×。CPU 原生模型的落点在此。
+
+### 26.7 复现
+
+```sh
+python -X utf8 experiments/_assoc_layers.py                      # §26.1 按层成本
+python -X utf8 experiments/_assoc_recall_layers.py               # §26.2 容量 vs 层数
+python -X utf8 experiments/_state_collapse.py --preset small --steps 1200   # §26.3
+python -X utf8 experiments/_state_collapse.py --preset small --steps 1200 \
+    --ablation "assoc=1,assoc_slots=32,assoc_m=16"               # §26.3 对照
+python -X utf8 experiments/_output_collapse.py --ckpt runs/base_small_zh.pt # §26.4
+# §26.5 同预算收敛对照 (每个训练约 2-4 h, 全 CPU)
+python -X utf8 experiments/_converge_compare.py --tag base_small_zh
+python -X utf8 experiments/_converge_compare.py --tag assoc_small_zh  --assoc --every 1
+python -X utf8 experiments/_converge_compare.py --tag assoc2_small_zh --assoc --every 2
+python -X utf8 experiments/_converge_compare.py --tag tf_small_zh --arch transformer
+python -X utf8 train/evaluate.py --ckpt runs/<tag>.pt --gen --out runs/<tag>_eval.json
+python -X utf8 experiments/_gpu_compare.py                       # §26.6 (需 GPU 环境变量)
+```
+
+---
+
+## 27. 完整复现
 
 ```bash
 # 1. 环境
