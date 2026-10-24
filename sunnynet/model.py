@@ -42,6 +42,19 @@ class SunnyConfig:
                            layers=4, h_max=2048.0)
 
     @staticmethod
+    def deepl6(vocab_size: int) -> "SunnyConfig":
+        """深瘦阶梯: 与 small 近似同栈参数, 只把层数 4->6、dim 128->96.
+        用于隔离"深度"对层间公共分量累积的影响."""
+        return SunnyConfig(vocab_size=vocab_size, dim=96, inner=152, rank=128,
+                           layers=6, h_max=4096.0)
+
+    @staticmethod
+    def deepl8(vocab_size: int) -> "SunnyConfig":
+        """更深: 层数 8、dim 80."""
+        return SunnyConfig(vocab_size=vocab_size, dim=80, inner=128, rank=160,
+                           layers=8, h_max=4096.0)
+
+    @staticmethod
     def proto20m(vocab_size: int) -> "SunnyConfig":
         return SunnyConfig(vocab_size=vocab_size, dim=512, inner=896, rank=320,
                            layers=10, h_max=8192.0)
@@ -66,6 +79,10 @@ class SunnyNet(nn.Module):
             for i in range(cfg.layers)
         ])
         self.norm_out = CenteredScaleNorm(cfg.dim)
+        # 残差流逐层累积跨输入共享的 DC (L8/d1408 实测特异能量 22.6%->3.5%).
+        # 曾试过在残差流上做归一化去 DC, 实测反而把特异分量压到 0
+        # (ppl 263->625, 24 输入塌成单一 argmax) —— 残差流不可清洗, 保留作证伪对照.
+        self.h_norm = CenteredScaleNorm(cfg.dim) if ab.get("h_norm", False) else None
         self.head = nn.Linear(cfg.dim, cfg.vocab_size, bias=False)
         if cfg.tie_embeddings:
             self.head.weight = self.embed.weight
@@ -122,6 +139,8 @@ class SunnyNet(nn.Module):
                     nm[:, i] = m_i
             else:
                 x, s_i, h_i = blk(x, s[:, i], hist[:, i])
+            if self.h_norm is not None:
+                x = self.h_norm(x)
             if return_state:
                 ns[:, i] = s_i
                 nh[:, i] = h_i
@@ -145,6 +164,8 @@ class SunnyNet(nn.Module):
                 nm[:, i] = m_i
             else:
                 x, s_i, h_i = blk.step(x, state.s[:, i], state.hist[:, i])
+            if self.h_norm is not None:
+                x = self.h_norm(x)
             ns[:, i] = s_i
             nh[:, i] = h_i
         logits = self.head(self.norm_out(x))

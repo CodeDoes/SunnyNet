@@ -341,6 +341,10 @@ class SunnyBlock(nn.Module):
         y = self._readout(u, None)
         sn = self.norm_s(states) if self.norm_s is not None else states
         prev = self._prev(states, s_in)
+        if self.norm_s is not None:
+            # 只归一化 sn 会让 DC 从反馈支路漏回残差流 (实测末层特异占比 0.285 vs 0.263),
+            # 反馈源必须一起归一化才堵得住.
+            prev = self.norm_s(prev)
         if self.circ is not None:
             sfb = F.linear(prev, self._Ws_eff())
         else:
@@ -417,10 +421,14 @@ class SunnyBlock(nn.Module):
             s_new = p_t * s + (1.0 - p_t) * u_t
         y = self._readout(u_t[:, None, :], None)[:, 0]
         sn = self.norm_s(s_new[:, None, :])[:, 0] if self.norm_s is not None else s_new
-        if self.circ is not None:
-            sfb = F.linear(s, self._Ws_eff())
+        if self.norm_s is not None:
+            s_fb = self.norm_s(s[:, None, :])[:, 0]
         else:
-            sfb = self.W_s(s)
+            s_fb = s
+        if self.circ is not None:
+            sfb = F.linear(s_fb, self._Ws_eff())
+        else:
+            sfb = self.W_s(s_fb)
         out = self.W_c(y) + self.b_gain * sn + sfb
         if self.use_state_mul:
             out = out + self.W_g(y) * sn

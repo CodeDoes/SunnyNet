@@ -120,8 +120,27 @@ def main():
         iu = torch.triu_indices(n, n, offset=1)
         return float(c[iu[0], iu[1]].mean())
 
+    def centered_cos(mat):
+        # 去跨输入均值. 语言模型的公共分量 (unigram 偏置) 会让原始余弦虚高,
+        # 只有去均值后仍高的才是"输入特异性真的被抹平".
+        return pair_cos(mat - mat.mean(0, keepdim=True))
+
+    def energy_split(mat):
+        """公共分量能量占比 与 输入特异性能量占比.
+
+        ||mean||^2 / mean(||x||^2) 越大 = 越被输入无关项主导;
+        特异占比 = mean(||x-mean||^2) / mean(||x||^2) = 1 - 公共占比(平方口径).
+        """
+        mu = mat.mean(0, keepdim=True)
+        pub = float(mu.norm().pow(2) / mat.norm(dim=-1).pow(2).mean().clamp_min(1e-12))
+        return round(pub, 4), round(1.0 - pub, 4)
+
     layer_cos = [round(pair_cos(p), 4) for p in per_layer]
+    layer_cos_c = [round(centered_cos(p), 4) for p in per_layer]
     h_cos = [round(pair_cos(p), 4) for p in h_layer]
+    h_cos_c = [round(centered_cos(p), 4) for p in h_layer]
+    state_pub, state_spec = energy_split(last_state)
+    resid_pub, resid_spec = energy_split(h_layer[-1])
     sc = pair_cos(last_state)
     tl_cos = pair_cos(tl)
     # 逐 token 位置的平均成对余弦 (残差流), 判断坍缩是逐 token 全局还是仅在末端
@@ -157,9 +176,15 @@ def main():
     print(json.dumps({
         "preset": args.preset, "domain": args.domain, "steps": args.steps,
         "layer_pair_cos": layer_cos,
+        "layer_pair_cos_centered": layer_cos_c,
         "residual_layer_cos": h_cos,
+        "residual_layer_cos_centered": h_cos_c,
         "residual_pos_cos_last_layer": h_pos_cos,
         "last_state_pair_cos": round(sc, 4),
+        "state_public_energy_ratio": state_pub,
+        "state_input_specific_energy_ratio": state_spec,
+        "residual_public_energy_ratio": resid_pub,
+        "residual_input_specific_energy_ratio": resid_spec,
         "trained_logit_cos": round(tl_cos, 4),
         "state_rel_diff_two_inputs": round(float(diff), 4),
         "random_init_logit_cos": round(rand_cos, 4),

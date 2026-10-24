@@ -40,6 +40,7 @@ def main():
     ap.add_argument("--m", type=int, default=16)
     ap.add_argument("--every", type=int, default=1,
                     help="assoc_every: 每 k 层开一个 (0=全开)")
+    ap.add_argument("--ablation", default="", help='追加原样透传的 ablation, 如 "h_norm=1"')
     ap.add_argument("--threads", type=int, default=6)
     args = ap.parse_args()
 
@@ -62,6 +63,8 @@ def main():
     if args.assoc:
         argv += ["--ablation",
                  f"assoc=1,assoc_slots={args.slots},assoc_m={args.m},assoc_every={args.every}"]
+    elif args.ablation:
+        argv += ["--ablation", args.ablation]
     sys.argv = ["train.py"] + argv
     print(f"=== 训练 tag={args.tag} arch={args.arch} steps={args.steps} "
           f"tokens={args.steps * args.B * args.T:,} assoc={args.assoc}")
