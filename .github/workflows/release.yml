@@ -18,10 +18,10 @@ jobs:
           python-version: "3.12"
       - name: Install build tools
         run: python -m pip install build twine
-      - name: Build sdist and wheel
+      - name: Build sdist
         shell: bash
         run: |
-          python -m build
+          python -m build --sdist
           twine check dist/*
       - name: Add the published Windows wheel from PyPI
         shell: bash
@@ -70,6 +70,11 @@ jobs:
         run: |
           f="docs/RELEASE_${GITHUB_REF_NAME}.md"
           if [ -f "$f" ]; then echo "path=$f" >> "$GITHUB_OUTPUT"; fi
+      - name: Replace existing release for this tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release delete "$GITHUB_REF_NAME" --yes --cleanup-tag=false || true
       - name: Create release
         if: steps.notes.outputs.path != ''
         uses: softprops/action-gh-release@v2
