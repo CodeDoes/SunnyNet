@@ -1,0 +1,35 @@
+Warning: Looks like you're using an outdated `kaggle` version (installed: 2.2.4), please consider upgrading to the latest version (2.2.5)
+[{"stream_name":"stdout","time":0.917068153,"data":"== [1/6] clone ==\n"}
+,{"stream_name":"stdout","time":0.917184326,"data":"$ git clone --depth 1 https://github.com/SunnyClaw-cx/SunnyNet /kaggle/working/SunnyNet\n"}
+,{"stream_name":"stdout","time":1.922877954,"data":"== [2/6] patch ==\n"}
+,{"stream_name":"stdout","time":1.923591091,"data":"  patched train.py (+save-every)\n"}
+,{"stream_name":"stdout","time":1.923605714,"data":"== [3/6] corpus ==\n"}
+,{"stream_name":"stdout","time":1.92379221,"data":"  wrote fetch_books.py (3567 bytes)\n"}
+,{"stream_name":"stdout","time":1.9238035340000001,"data":"$ /usr/bin/python3 prepare_data.py --only-code\n"}
+,{"stream_name":"stdout","time":18.721760098,"data":"[2/2] Python 源码\n"}
+,{"stream_name":"stdout","time":18.721802742,"data":"  TheAlgorithms/Python: 1347 files\n"}
+,{"stream_name":"stdout","time":18.721807033,"data":"  code_python: files=1347 chars=2,180,028\n"}
+,{"stream_name":"stdout","time":18.721824046000002,"data":"\n"}
+,{"stream_name":"stdout","time":18.721827904,"data":"语料统计\n"}
+,{"stream_name":"stdout","time":18.721831863,"data":"  code_python      files= 1347 bytes=2,180,131\n"}
+,{"stream_name":"stdout","time":18.721835832,"data":"\n"}
+,{"stream_name":"stderr","time":18.722377626,"data":"Traceback (most recent call last):\n"}
+,{"stream_name":"stderr","time":18.722947347,"data":"  File \"/kaggle/src/script.py\", line 409, in \u003cmodule\u003e\n"}
+,{"stream_name":"stderr","time":18.722956986,"data":"    main()\n"}
+,{"stream_name":"stderr","time":18.722960475,"data":"    ~~~~^^\n"}
+,{"stream_name":"stderr","time":18.722963683,"data":"  File \"/kaggle/src/script.py\", line 193, in main\n"}
+,{"stream_name":"stderr","time":18.722967121,"data":"    \"import io, tarfile, urllib.request, prepare_data as pd\\n\"\n"}
+,{"stream_name":"stderr","time":18.722970712,"data":"    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"}
+,{"stream_name":"stderr","time":18.722974086,"data":"    ...\u003c14 lines\u003e...\n"}
+,{"stream_name":"stderr","time":18.722977484,"data":"    \"                if len(body)\u003c500: continue\\n\"\n"}
+,{"stream_name":"stderr","time":18.72298094,"data":"    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n"}
+,{"stream_name":"stderr","time":18.722984352,"data":"    \"                pd.save('code_python', f'repo_{repo.replace(\"/\", \"+\")}__'+m.name.replace('/','__'), body)\\n\"\n"}
+,{"stream_name":"stderr","time":18.722988119,"data":"    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^~~~~\n"}
+,{"stream_name":"stderr","time":18.722991425,"data":"TypeError: unsupported operand type(s) for /: 'str' and 'str'\n"}
+,{"stream_name":"stderr","time":20.955854762,"data":"/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":20.955879224,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":21.336472506,"data":"/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":21.336497435,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":23.164819008,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":24.23137566,"data":"[NbConvertApp] Writing 335265 bytes to __results__.html\n"}
+]

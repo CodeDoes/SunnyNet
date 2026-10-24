@@ -1,0 +1,156 @@
+Warning: Looks like you're using an outdated `kaggle` version (installed: 2.2.4), please consider upgrading to the latest version (2.2.5)
+[{"stream_name":"stdout","time":0.968961445,"data":"== [1/6] clone ==\n"}
+,{"stream_name":"stdout","time":0.968988169,"data":"$ git clone --depth 1 https://github.com/SunnyClaw-cx/SunnyNet /kaggle/working/SunnyNet\n"}
+,{"stream_name":"stdout","time":1.981299189,"data":"== [2/6] patch ==\n"}
+,{"stream_name":"stdout","time":1.981852502,"data":"  patched train.py (+save-every)\n"}
+,{"stream_name":"stdout","time":1.981869259,"data":"== [3/6] corpus ==\n"}
+,{"stream_name":"stdout","time":1.98208151,"data":"  wrote fetch_books.py (3567 bytes)\n"}
+,{"stream_name":"stdout","time":1.98209912,"data":"$ /usr/bin/python3 prepare_data.py --only-code\n"}
+,{"stream_name":"stdout","time":3.592059156,"data":"[2/2] Python 源码\n"}
+,{"stream_name":"stdout","time":3.592086064,"data":"  TheAlgorithms/Python: 1347 files\n"}
+,{"stream_name":"stdout","time":3.5920918139999998,"data":"  code_python: files=1347 chars=2,180,028\n"}
+,{"stream_name":"stdout","time":3.592095544,"data":"\n"}
+,{"stream_name":"stdout","time":3.592099867,"data":"语料统计\n"}
+,{"stream_name":"stdout","time":3.592104769,"data":"  code_python      files= 1347 bytes=2,180,131\n"}
+,{"stream_name":"stdout","time":3.5921098049999998,"data":"\n"}
+,{"stream_name":"stdout","time":3.592114483,"data":"$ /usr/bin/python3 fetch_books.py --top 200 --pages 7\n"}
+,{"stream_name":"stdout","time":128.599389728,"data":"[gutendex] 抓取 EN 书目 (pages=7) ...\n"}
+,{"stream_name":"stdout","time":128.59943355,"data":"  候选 223 本公开领域英文书, 取下载量最高的 200 本\n"}
+,{"stream_name":"stdout","time":128.599438061,"data":"  ...50/200  en=49 drop=1\n"}
+,{"stream_name":"stdout","time":128.599441074,"data":"  ...100/200  en=99 drop=1\n"}
+,{"stream_name":"stdout","time":128.599444036,"data":"  ...150/200  en=149 drop=1\n"}
+,{"stream_name":"stdout","time":128.599446918,"data":"  ...200/200  en=197 drop=3\n"}
+,{"stream_name":"stdout","time":128.59944963,"data":"  分域结果: {'zh_ancient': 0, 'en_literature': 197, 'drop': 3}\n"}
+,{"stream_name":"stdout","time":128.599452457,"data":"  字符数: {'zh_ancient': '0', 'en_literature': '119,076,836'}\n"}
+,{"stream_name":"stdout","time":128.599455297,"data":"\n"}
+,{"stream_name":"stdout","time":128.601252924,"data":"$ /usr/bin/python3 build_corpus.py --vocab-size 8192\n"}
+,{"stream_name":"stdout","time":225.262271493,"data":"[1/3] 训练 BPE 分词器 ...\n"}
+,{"stream_name":"stdout","time":225.262307623,"data":"[bpe] chunks=17122 chars=104 seqs=17114\n"}
+,{"stream_name":"stdout","time":225.262313559,"data":"[bpe] merges=1000 vocab=1108\n"}
+,{"stream_name":"stdout","time":225.262318419,"data":"[bpe] merges=2000 vocab=2108\n"}
+,{"stream_name":"stdout","time":225.262322685,"data":"[bpe] merges=3000 vocab=3108\n"}
+,{"stream_name":"stdout","time":225.262326621,"data":"[bpe] merges=4000 vocab=4108\n"}
+,{"stream_name":"stdout","time":225.262330534,"data":"[bpe] merges=5000 vocab=5108\n"}
+,{"stream_name":"stdout","time":225.262334259,"data":"[bpe] merges=6000 vocab=6108\n"}
+,{"stream_name":"stdout","time":225.262338352,"data":"[bpe] merges=7000 vocab=7108\n"}
+,{"stream_name":"stdout","time":225.262342966,"data":"[bpe] merges=8000 vocab=8108\n"}
+,{"stream_name":"stdout","time":225.262347258,"data":"  vocab_size=8192 merges=8084\n"}
+,{"stream_name":"stdout","time":225.262351814,"data":"[2/3] 编码各域 ...\n"}
+,{"stream_name":"stdout","time":225.26235661,"data":"  en_literature  files train/val = 185/12  tokens 67,830,435 / 5,182,425\n"}
+,{"stream_name":"stdout","time":225.262361268,"data":"  code_python    files train/val = 1267/80  tokens 1,204,271 / 75,932\n"}
+,{"stream_name":"stdout","time":225.262374665,"data":"[3/3] 完成\n"}
+,{"stream_name":"stdout","time":225.262378508,"data":"  en_literature  train=67,830,435  val=5,182,425\n"}
+,{"stream_name":"stdout","time":225.262382456,"data":"  code_python    train= 1,204,271  val=  75,932\n"}
+,{"stream_name":"stdout","time":225.262386144,"data":"  total train=69,034,706  val=5,258,357\n"}
+,{"stream_name":"stdout","time":225.262395137,"data":"\n"}
+,{"stream_name":"stdout","time":225.262398372,"data":"== [4/6] smoke ==\n"}
+,{"stream_name":"stdout","time":225.262401808,"data":"$ /usr/bin/python3 train/train.py --arch sunnynet --preset p100m --device cuda --threads 1 --steps 60 --batch-size 2 --seq-len 512 --mix en_literature=1.0 --val-every 60\n"}
+,{"stream_name":"stdout","time":280.902867622,"data":"=== sunnynet | preset=p100m | threads=1 | params=102,126,662 (non-embed 93,738,054) | kernel=False\n"}
+,{"stream_name":"stdout","time":280.902907879,"data":"    steps=60 bs=2 seq=512 lr=0.003 tokens=61,440\n"}
+,{"stream_name":"stdout","time":280.902912264,"data":"    cache counter available=False | mix={'en_literature': 1.0} | ablation=none\n"}
+,{"stream_name":"stdout","time":280.902915474,"data":"  step    60 loss=4.2503 val=4.0512 ppl=57.46 0.286 ms/tok gn=1.419 rss=0MB cache=None pf/s=None 18.3s\n"}
+,{"stream_name":"stdout","time":280.902918593,"data":"=== 完成 wall=18.3s  0.286 ms/token  peak_rss=0MB  pf/s=None  best_val=4.051174\n"}
+,{"stream_name":"stdout","time":280.902922151,"data":"\n"}
+,{"stream_name":"stdout","time":280.902924972,"data":"== [5/6] train ==\n"}
+,{"stream_name":"stdout","time":299.682464126,"data":"  batch=8 selected\n"}
+,{"stream_name":"stdout","time":299.682759181,"data":"  EN tokens=67,830,435 -\u003e 24841 steps for 1.5 epochs; using 24841 (~1.50 epochs, cap 27000)\n"}
+,{"stream_name":"stdout","time":299.682772246,"data":"$ /usr/bin/python3 train/train.py --arch sunnynet --preset p100m --device cuda --threads 1 --steps 24841 --batch-size 8 --seq-len 512 --mix en_literature=1.0 --val-every 500 --save-every 2000 --save-ckpt runs/p100m_en.pt --no-early-stop\n"}
+,{"stream_name":"stdout","time":25643.320902613,"data":"82.0s\n"}
+,{"stream_name":"stdout","time":25643.320966776,"data":"  step  9000 loss=3.1146 val=3.0624 ppl=21.38 0.248 ms/tok gn=4.485 rss=0MB cache=None pf/s=None 9190.1s\n"}
+,{"stream_name":"stdout","time":25643.320973178,"data":"  step  9500 loss=3.0819 val=3.0268 ppl=20.63 0.248 ms/tok gn=4.001 rss=0MB cache=None pf/s=None 9698.6s\n"}
+,{"stream_name":"stdout","time":25643.320978069,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_010000.pt\n"}
+,{"stream_name":"stdout","time":25643.320983768,"data":"  step 10000 loss=2.8784 val=2.9596 ppl=19.29 0.248 ms/tok gn=4.135 rss=0MB cache=None pf/s=None 10207.9s\n"}
+,{"stream_name":"stdout","time":25643.320988413,"data":"  step 10500 loss=3.0341 val=2.9600 ppl=19.30 0.248 ms/tok gn=11.339 rss=0MB cache=None pf/s=None 10716.7s\n"}
+,{"stream_name":"stdout","time":25643.320993672,"data":"  step 11000 loss=2.8760 val=2.9085 ppl=18.33 0.248 ms/tok gn=15.720 rss=0MB cache=None pf/s=None 11225.8s\n"}
+,{"stream_name":"stdout","time":25643.320998246,"data":"  step 11500 loss=2.7822 val=2.9375 ppl=18.87 0.248 ms/tok gn=15.177 rss=0MB cache=None pf/s=None 11734.0s\n"}
+,{"stream_name":"stdout","time":25643.32100351,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_012000.pt\n"}
+,{"stream_name":"stdout","time":25643.321008368,"data":"  step 12000 loss=2.8129 val=2.9040 ppl=18.25 0.247 ms/tok gn=2.841 rss=0MB cache=None pf/s=None 12241.8s\n"}
+,{"stream_name":"stdout","time":25643.321013253,"data":"  step 12500 loss=2.8941 val=2.9050 ppl=18.27 0.247 ms/tok gn=5.975 rss=0MB cache=None pf/s=None 12750.2s\n"}
+,{"stream_name":"stdout","time":25643.32101814,"data":"  step 13000 loss=2.6799 val=2.8340 ppl=17.01 0.247 ms/tok gn=2.686 rss=0MB cache=None pf/s=None 13258.9s\n"}
+,{"stream_name":"stdout","time":25643.321036586,"data":"  step 13500 loss=2.8690 val=2.8297 ppl=16.94 0.247 ms/tok gn=2.602 rss=0MB cache=None pf/s=None 13767.5s\n"}
+,{"stream_name":"stdout","time":25643.32104095,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_014000.pt\n"}
+,{"stream_name":"stdout","time":25643.32104478,"data":"  step 14000 loss=2.7215 val=2.8113 ppl=16.63 0.247 ms/tok gn=2.521 rss=0MB cache=None pf/s=None 14277.0s\n"}
+,{"stream_name":"stdout","time":25643.321048729,"data":"  step 14500 loss=2.8090 val=2.7860 ppl=16.22 0.247 ms/tok gn=2.247 rss=0MB cache=None pf/s=None 14787.2s\n"}
+,{"stream_name":"stdout","time":25643.321052224,"data":"  step 15000 loss=2.6324 val=2.7868 ppl=16.23 0.247 ms/tok gn=2.051 rss=0MB cache=None pf/s=None 15296.8s\n"}
+,{"stream_name":"stdout","time":25643.321056339,"data":"  step 15500 loss=2.6083 val=2.7818 ppl=16.15 0.247 ms/tok gn=2.532 rss=0MB cache=None pf/s=None 15805.9s\n"}
+,{"stream_name":"stdout","time":25643.321059674,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_016000.pt\n"}
+,{"stream_name":"stdout","time":25643.321063078,"data":"  step 16000 loss=2.6673 val=2.7520 ppl=15.67 0.247 ms/tok gn=1.913 rss=0MB cache=None pf/s=None 16314.7s\n"}
+,{"stream_name":"stdout","time":25643.321066808,"data":"  step 16500 loss=2.6038 val=2.7499 ppl=15.64 0.247 ms/tok gn=2.631 rss=0MB cache=None pf/s=None 16824.5s\n"}
+,{"stream_name":"stdout","time":25643.321071042,"data":"  step 17000 loss=2.6868 val=2.7259 ppl=15.27 0.247 ms/tok gn=2.362 rss=0MB cache=None pf/s=None 17333.8s\n"}
+,{"stream_name":"stdout","time":25643.321077085,"data":"  step 17500 loss=2.5465 val=2.6969 ppl=14.83 0.247 ms/tok gn=1.628 rss=0MB cache=None pf/s=None 17842.5s\n"}
+,{"stream_name":"stdout","time":25643.321080932,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_018000.pt\n"}
+,{"stream_name":"stdout","time":25643.321084822,"data":"  step 18000 loss=2.8214 val=2.6938 ppl=14.79 0.247 ms/tok gn=2.028 rss=0MB cache=None pf/s=None 18352.0s\n"}
+,{"stream_name":"stdout","time":25643.321088831,"data":"  step 18500 loss=2.5692 val=2.6722 ppl=14.47 0.247 ms/tok gn=1.513 rss=0MB cache=None pf/s=None 18861.0s\n"}
+,{"stream_name":"stdout","time":25643.321092806,"data":"  step 19000 loss=2.5265 val=2.6643 ppl=14.36 0.247 ms/tok gn=1.436 rss=0MB cache=None pf/s=None 19369.2s\n"}
+,{"stream_name":"stdout","time":25643.321097032,"data":"  step 19500 loss=2.6122 val=2.6546 ppl=14.22 0.247 ms/tok gn=2.215 rss=0MB cache=None pf/s=None 19878.0s\n"}
+,{"stream_name":"stdout","time":25643.321100833,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_020000.pt\n"}
+,{"stream_name":"stdout","time":25643.321104817,"data":"  step 20000 loss=2.5049 val=2.6320 ppl=13.90 0.247 ms/tok gn=1.820 rss=0MB cache=None pf/s=None 20387.0s\n"}
+,{"stream_name":"stdout","time":25643.321109032,"data":"  step 20500 loss=2.5629 val=2.6366 ppl=13.97 0.247 ms/tok gn=2.078 rss=0MB cache=None pf/s=None 20896.2s\n"}
+,{"stream_name":"stdout","time":25643.321112538,"data":"  step 21000 loss=2.4995 val=2.6219 ppl=13.76 0.247 ms/tok gn=1.394 rss=0MB cache=None pf/s=None 21405.2s\n"}
+,{"stream_name":"stdout","time":25643.321116633,"data":"  step 21500 loss=2.5329 val=2.6161 ppl=13.68 0.247 ms/tok gn=2.603 rss=0MB cache=None pf/s=None 21914.4s\n"}
+,{"stream_name":"stdout","time":25643.3211205,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_022000.pt\n"}
+,{"stream_name":"stdout","time":25643.321124645,"data":"  step 22000 loss=2.4885 val=2.6102 ppl=13.60 0.247 ms/tok gn=1.472 rss=0MB cache=None pf/s=None 22423.3s\n"}
+,{"stream_name":"stdout","time":25643.321128657,"data":"  step 22500 loss=2.5180 val=2.5990 ppl=13.45 0.247 ms/tok gn=1.796 rss=0MB cache=None pf/s=None 22932.9s\n"}
+,{"stream_name":"stdout","time":25643.321136485,"data":"  step 23000 loss=2.4670 val=2.5888 ppl=13.31 0.247 ms/tok gn=1.658 rss=0MB cache=None pf/s=None 23442.8s\n"}
+,{"stream_name":"stdout","time":25643.321140456,"data":"  step 23500 loss=2.5428 val=2.5866 ppl=13.28 0.247 ms/tok gn=1.646 rss=0MB cache=None pf/s=None 23952.0s\n"}
+,{"stream_name":"stdout","time":25643.321144085,"data":"    里程碑 checkpoint -\u003e runs/p100m_en_024000.pt\n"}
+,{"stream_name":"stdout","time":25643.321147786,"data":"  step 24000 loss=2.4692 val=2.5836 ppl=13.24 0.247 ms/tok gn=1.935 rss=0MB cache=None pf/s=None 24461.6s\n"}
+,{"stream_name":"stdout","time":25643.32115177,"data":"  step 24500 loss=2.4156 val=2.5805 ppl=13.20 0.247 ms/tok gn=1.724 rss=0MB cache=None pf/s=None 24971.7s\n"}
+,{"stream_name":"stdout","time":25643.321155748,"data":"  step 24841 loss=2.4719 val=2.5713 ppl=13.08 0.247 ms/tok gn=2.207 rss=0MB cache=None pf/s=None 25320.3s\n"}
+,{"stream_name":"stdout","time":25643.321159211,"data":"=== 完成 wall=25320.3s  0.247 ms/token  peak_rss=0MB  pf/s=None  best_val=2.571313\n"}
+,{"stream_name":"stdout","time":25643.321162872,"data":"    checkpoint -\u003e runs/p100m_en.pt (442.2 MB)\n"}
+,{"stream_name":"stdout","time":25643.321166749,"data":"\n"}
+,{"stream_name":"stdout","time":25643.321170352,"data":"== [6/6] milestone samples ==\n"}
+,{"stream_name":"stdout","time":25643.322023755,"data":"\n"}
+,{"stream_name":"stdout","time":25643.32204285,"data":"### p100m_en.pt\n"}
+,{"stream_name":"stdout","time":25643.322047173,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en.pt --prompt It was the best of times,  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25664.861012275,"data":"and and the body and\n"}
+,{"stream_name":"stdout","time":25664.86107098,"data":"present it was no truth was works to regular on the bitter\n"}
+,{"stream_name":"stdout","time":25664.861075852,"data":"and I should be co\n"}
+,{"stream_name":"stdout","time":25664.861079639,"data":"\n"}
+,{"stream_name":"stdout","time":25664.861082936,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en.pt --prompt Once upon a time,  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25686.009724141,"data":"and of any resemblished in which\n"}
+,{"stream_name":"stdout","time":25686.009784686,"data":"I should find to take the most to spoke of the other family of the s\n"}
+,{"stream_name":"stdout","time":25686.009790301,"data":"\n"}
+,{"stream_name":"stdout","time":25686.009793274,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en.pt --prompt The morning sun was  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25707.082604573,"data":"one to do the brace of\n"}
+,{"stream_name":"stdout","time":25707.082644215,"data":"Seters in the catural of a sky shown that she had been made of a conclu\n"}
+,{"stream_name":"stdout","time":25707.08266162,"data":"\n"}
+,{"stream_name":"stdout","time":25707.082667314,"data":"\n"}
+,{"stream_name":"stdout","time":25707.082672066,"data":"### p100m_en_012000.pt\n"}
+,{"stream_name":"stdout","time":25707.082677121,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en_012000.pt --prompt It was the best of times,  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25728.220487365,"data":"fort the old of the own. I was remember\n"}
+,{"stream_name":"stdout","time":25728.220532077,"data":"herself to her is no night and one of them real the fourney done\n"}
+,{"stream_name":"stdout","time":25728.220537507,"data":"\n"}
+,{"stream_name":"stdout","time":25728.220554417,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en_012000.pt --prompt Once upon a time,  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25749.45792372,"data":"beare tight down for his wife of the\n"}
+,{"stream_name":"stdout","time":25749.457961966,"data":"moment the plow of a grand a wor of my lorder of the tirds \n"}
+,{"stream_name":"stdout","time":25749.457965642,"data":"\n"}
+,{"stream_name":"stdout","time":25749.457968416,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en_012000.pt --prompt The morning sun was  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25771.15178749,"data":"a great at\n"}
+,{"stream_name":"stdout","time":25771.15184891,"data":"the most the old and one of each of the others of the prawing with a spee of a decre\n"}
+,{"stream_name":"stdout","time":25771.15185646,"data":"\n"}
+,{"stream_name":"stdout","time":25771.151861722,"data":"\n"}
+,{"stream_name":"stdout","time":25771.151867112,"data":"### p100m_en_024000.pt\n"}
+,{"stream_name":"stdout","time":25771.151871534,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en_024000.pt --prompt It was the best of times,  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25792.596757151,"data":"and I heard at the believe and\n"}
+,{"stream_name":"stdout","time":25792.596798306,"data":"On a true would have been the laugh of a few follow on it windo\n"}
+,{"stream_name":"stdout","time":25792.596803746,"data":"\n"}
+,{"stream_name":"stdout","time":25792.596806816,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en_024000.pt --prompt Once upon a time,  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25813.967525671,"data":"then in the twenty back I know rejected\n"}
+,{"stream_name":"stdout","time":25813.967568379,"data":"to the world of the Church Parrence in the stroving of the\n"}
+,{"stream_name":"stdout","time":25813.967574961,"data":"\n"}
+,{"stream_name":"stdout","time":25813.967580102,"data":"$ /usr/bin/python3 -m sunnynet.cli --ckpt /kaggle/working/SunnyNet/runs/p100m_en_024000.pt --prompt The morning sun was  --max-new 60 --temperature 0.7\n"}
+,{"stream_name":"stdout","time":25835.135643716,"data":"declared to the\n"}
+,{"stream_name":"stdout","time":25835.135679207,"data":"since more be banked by the corporation and would be be sure presented\n"}
+,{"stream_name":"stdout","time":25835.135685471,"data":"her care\n"}
+,{"stream_name":"stdout","time":25835.135690102,"data":"\n"}
+,{"stream_name":"stdout","time":25835.786201198,"data":"\n"}
+,{"stream_name":"stdout","time":25835.78622763,"data":"results -\u003e /kaggle/output (results.json + checkpoint copies)\n"}
+,{"stream_name":"stderr","time":25839.993616121,"data":"/usr/local/lib/python3.13/dist-packages/mistune.py:435: SyntaxWarning: invalid escape sequence '\\|'\n"}
+,{"stream_name":"stderr","time":25839.99364792,"data":"  cells[i][c] = re.sub('\\\\\\\\\\|', '|', cell)\n"}
+,{"stream_name":"stderr","time":25840.356807262,"data":"/usr/local/lib/python3.13/dist-packages/nbconvert/filters/filter_links.py:36: SyntaxWarning: invalid escape sequence '\\_'\n"}
+,{"stream_name":"stderr","time":25840.356835008,"data":"  text = re.sub(r'_', '\\_', text) # Escape underscores in display text\n"}
+,{"stream_name":"stderr","time":25841.302265229,"data":"[NbConvertApp] Converting notebook __script__.ipynb to html\n"}
+,{"stream_name":"stderr","time":25842.464847069,"data":"[NbConvertApp] Writing 331302 bytes to __results__.html\n"}
+]
