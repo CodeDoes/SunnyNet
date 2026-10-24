@@ -133,6 +133,33 @@ def test_recommended_threads_is_physical_cores():
     assert set_threads(n) == n
 
 
+def test_threads_for_blob_picks_by_size(tmp_path):
+    """小 blob 单线程 (并行只增同步开销), 大 blob 用物理核."""
+    from sunnynet.runtime.model import threads_for_blob, recommended_threads
+    small = tmp_path / "small.bin"
+    small.write_bytes(b"\0" * (16 * 1024 * 1024))
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"\0" * (64 * 1024 * 1024))
+    assert threads_for_blob(small) == 1
+    assert threads_for_blob(big) == max(1, recommended_threads())
+    # 缺失文件回退到物理核, 不抛异常
+    assert threads_for_blob(tmp_path / "nope.bin") >= 1
+
+
+@NEED_RUNTIME
+def test_snmodel_auto_threads_matches_blob_size():
+    """SnModel 未显式指定线程时按 blob 大小自选, 且覆盖参数生效."""
+    from sunnynet.cli import load_model
+    from sunnynet.runtime.model import SnModel, threads_for_blob
+    _, cfg, _ = load_model(str(CKPT))
+    args = (cfg.vocab_size, cfg.dim, cfg.inner, cfg.rank, cfg.taps,
+            cfg.layers, 8, int(cfg.tie_embeddings))
+    rt = SnModel(str(BLOB), *args)
+    assert rt.threads == threads_for_blob(BLOB)
+    rt2 = SnModel(str(BLOB), *args, threads=2)
+    assert rt2.threads == 2
+
+
 @NEED_RUNTIME
 def test_half_weights_track_fp32_argmax():
     """fp16 权重路径与 fp32 路径在同序列上 argmax 一致, logits 偏差有界.

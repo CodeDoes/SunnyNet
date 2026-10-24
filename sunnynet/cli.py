@@ -495,16 +495,17 @@ def main(argv=None):
 
     runtime = None
     if args.backend == "c":
-        from .runtime.model import SnModel, set_threads, recommended_threads
-        set_threads(args.threads if args.threads > 0 else recommended_threads())
+        from .runtime.model import SnModel, threads_for_blob
         blob = Path(args.blob) if args.blob else Path(args.ckpt).with_suffix(".runtime.bin")
         if not blob.exists():
             raise SystemExit(f"缺少权重 blob: {blob}\n"
                              f"先运行: python -X utf8 experiments/_export_runtime.py "
                              f"{args.ckpt} {blob}")
+        # 小模型单线程最快, 大模型用物理核; --threads 显式指定时以用户为准.
+        thr = args.threads if args.threads > 0 else threads_for_blob(blob)
         runtime = SnModel(blob, cfg.vocab_size, cfg.dim, cfg.inner, cfg.rank,
                           cfg.taps, cfg.layers, 8, int(cfg.tie_embeddings),
-                          half=args.half)
+                          half=args.half, threads=thr)
 
     pieces = []
     for p in decode_stream(model, tk, args.prompt, args.max_new,

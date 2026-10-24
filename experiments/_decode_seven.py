@@ -15,7 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 SPEC = {"sunny": (80, 160, 244, 4)}
 TARGET = 365844
-ARCHS = ["sunny", "transformer", "rwkv", "mamba", "h3", "hyena", "linear_attn"]
+ARCHS = ["sunny", "sunnyC", "transformer", "rwkv", "mamba", "h3", "hyena", "linear_attn"]
+SPEC_BLOB = ROOT / "experiments/ckpts_decode/d80.runtime.bin"
 
 CELL = r'''
 import json, sys, time
@@ -27,6 +28,20 @@ from sunnynet.linear_baselines import build_linear_baseline, _make
 T, name, thr, reps = {T}, "{name}", {thr}, {reps}
 torch.set_num_threads(thr); torch.manual_seed(1234)
 V = 8192
+if name == "sunnyC":
+    # 与 sunny 同规格 (同 ckpt 导出的 blob), 走整模型 C 单步. 小模型下 OpenMP 有开销,
+    # 线程数由 sn_recommended_threads 之外的单线程口径给出 (见 experiments/_decode_cthreads.py).
+    from sunnynet.runtime.model import SnModel, set_threads
+    set_threads(1)
+    rt = SnModel(r"{blob}", V, 80, 160, 244, 4, 4, 8, 1)
+    idx = torch.randint(0, V, (T,)).tolist()
+    rt.prefill(idx)
+    one = int(torch.randint(0, V, (1,)).item()); rt.step(one)
+    ts = []
+    for _ in range(reps):
+        t0 = time.perf_counter(); rt.step(one); ts.append(time.perf_counter()-t0)
+    print("CELL " + json.dumps({{"ms": st.median(ts) * 1000}}))
+    raise SystemExit(0)
 ref = SunnyNet(SunnyConfig.small(V))
 target = ref.num_params(non_embedding=True); del ref
 if name in {spec}:
@@ -61,7 +76,7 @@ def reps_for(T: int) -> int:
 
 def cell(name: str, T: int, thr: int = 1) -> float:
     code = CELL.format(root=str(ROOT), T=T, name=name, thr=thr,
-                       reps=reps_for(T), spec=repr(SPEC))
+                       reps=reps_for(T), spec=repr(SPEC), blob=str(SPEC_BLOB))
     r = subprocess.run([PY, "-X", "utf8", "-c", code], capture_output=True, text=True,
                        encoding="utf-8", cwd=str(ROOT), env=dict(os.environ))
     for ln in r.stdout.splitlines():

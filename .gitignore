@@ -6,6 +6,7 @@ runs/
 experiments/ckpts_ood/
 experiments/ckpts_100m/
 experiments/ckpts_longrecall/
+experiments/ckpts_decode/
 
 # 基准输出 (由 experiments 脚本重新生成)
 results/
@@ -19,6 +20,7 @@ venv/
 
 # 测试与缓存
 .pytest_cache/
+.pytest_tmp/
 .coverage
 htmlcov/
 

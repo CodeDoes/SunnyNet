@@ -6,7 +6,8 @@ from pathlib import Path
 
 from . import BUILD, HERE, _find_gcc, compile_flags, shlib_name
 
-__all__ = ["SnModel", "model_available", "set_threads", "get_threads"]
+__all__ = ["SnModel", "model_available", "set_threads", "get_threads",
+           "recommended_threads", "threads_for_blob"]
 
 DLL = BUILD / shlib_name("sunnynet_model")
 
@@ -101,14 +102,33 @@ def recommended_threads() -> int:
     return n
 
 
+# 小模型权重随每步读完后驻留缓存, 并行无带宽收益、只多同步开销. 实测 (B=1, T=256,
+# 单步, 各规模独立子进程): <=23MB 单线程最快, >=39MB 物理核最快 (d768 快 1.29x).
+_SMALL_BLOB = 32 * 1024 * 1024
+
+
+def threads_for_blob(path) -> int:
+    """按权重字节数选解码并行度: 小 blob 单线程, 大 blob 物理核。"""
+    try:
+        size = Path(path).stat().st_size
+    except OSError:
+        return recommended_threads() or 1
+    if size < _SMALL_BLOB:
+        return 1
+    return max(1, recommended_threads())
+
+
 class SnModel:
     """B=1 单序列解码句柄. logits 复用同一缓冲."""
 
     def __init__(self, path, vocab, dim, inner, rank, taps, layers,
-                 group=8, tied=1, half=False):
+                 group=8, tied=1, half=False, threads=None):
         self._lib = _load()
         self._logits = (ctypes.c_float * vocab)()
         self._path = str(path).encode()
+        if threads is None:
+            threads = threads_for_blob(path)
+        self.threads = set_threads(threads)
         load = self._lib.sn_load_h if half else self._lib.sn_load
         self._h = load(self._path, vocab, dim, inner, rank,
                        taps, layers, group, int(tied))
