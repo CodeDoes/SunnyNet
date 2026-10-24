@@ -1,5 +1,7 @@
 # 安全与使用声明 / Safety Notice
 
+*[English](safety_notice.en.md)*
+
 **SunnyNet 是实验性科研项目，不是产品，也没有经过任何安全对齐（alignment）流程。**
 
 ## 1. 通用限制

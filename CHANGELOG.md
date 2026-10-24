@@ -1,5 +1,7 @@
 # Changelog
 
+*[English](CHANGELOG.en.md)*
+
 ## v0.3.0
 
 ### 层数扩展的代价机制与新预设

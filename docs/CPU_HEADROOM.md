@@ -1,5 +1,7 @@
 # CPU 训练速度剩余空间
 
+*[English](CPU_HEADROOM.en.md)*
+
 机器：i7-8750H（Coffee Lake，6C12T，AVX2，无 AVX-512 / 无 VNNI / 无 AMX）
 torch 2.14.1+cpu，MKL 2026.1 + oneDNN v3.12 已启用，`capability=AVX2`。
 数字来自 `experiments/` 下本机实测，每格独立子进程。

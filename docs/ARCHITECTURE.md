@@ -1,5 +1,7 @@
 # SunnyNet 架构说明
 
+*[English](ARCHITECTURE.en.md)*
+
 > 本文档给出 SunnyNet 的全部数学定义与设计依据。
 > SunnyNet 为独立原创架构，**不基于** Transformer / RNN(LSTM/GRU) / Mamba(SSM) / CNN
 > 等任何既有神经网络范式，也不复用 ReLU/GELU/SiLU、LayerNorm/RMSNorm/InstanceNorm、

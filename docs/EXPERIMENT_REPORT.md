@@ -1,5 +1,7 @@
 # SunnyNet 实验报告
 
+*[English](EXPERIMENT_REPORT.en.md)*
+
 数据全部来自本机实测，不引用论文数字、不做外推估算。每个数字都能在  
 `experiments/results/*.json` 中找到对应原始记录。未测、不可测或存在混淆因素的项，  
 在文中直接标注，不用估算值代替实测值。

@@ -17,6 +17,8 @@ def row(path: Path) -> dict | None:
         d = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return None
+    if not isinstance(d, dict):
+        return None
     s = d.get("summary") or {}
     a = d.get("args") or {}
     if not s:
@@ -74,18 +76,18 @@ def main():
         return 1
 
     groups = {
-        "基线对照": lambda r: r["file"].startswith("baseline_"),
-        "消融": lambda r: r["file"].startswith("ablation_"),
-        "种子稳定性": lambda r: r["file"].startswith("seed_"),
-        "缩放": lambda r: r["file"].startswith("scale_"),
-        "长序列训练": lambda r: r["file"].startswith("longseq_"),
-        "学习率标定": lambda r: r["file"].startswith("tune_"),
+        "Baseline comparison": lambda r: r["file"].startswith("baseline_"),
+        "Ablation": lambda r: r["file"].startswith("ablation_"),
+        "Seed stability": lambda r: r["file"].startswith("seed_"),
+        "Scaling": lambda r: r["file"].startswith("scale_"),
+        "Long-sequence training": lambda r: r["file"].startswith("longseq_"),
+        "Learning-rate calibration": lambda r: r["file"].startswith("tune_"),
     }
-    cols = [("file", "结果文件"), ("arch", "架构"), ("preset", "预设"),
-            ("params", "总参数"), ("stack", "计算栈参数"), ("steps", "步数"),
+    cols = [("file", "result file"), ("arch", "arch"), ("preset", "preset"),
+            ("params", "total params"), ("stack", "stack params"), ("steps", "steps"),
             ("train", "train loss"), ("val", "val loss"), ("ppl", "ppl"),
-            ("ms_tok", "ms/token"), ("tok_s", "token/s"), ("rss", "峰值MB"),
-            ("gn", "梯度范数"), ("cache_kind", "访存探针")]
+            ("ms_tok", "ms/token"), ("tok_s", "token/s"), ("rss", "peak MB"),
+            ("gn", "grad norm"), ("cache_kind", "memory probe")]
 
     out = []
     for name, pred in groups.items():

@@ -1,5 +1,7 @@
 # 仓库缺口审计
 
+*[English](REPO_AUDIT.en.md)*
+
 结论来自 API / 文件系统 / 干净副本实测，非推断。
 干净副本 = `git archive HEAD | tar -x`（等价 CI 检出，无 `data/` 目录）。
 
