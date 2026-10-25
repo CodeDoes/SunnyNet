@@ -1792,7 +1792,7 @@ Measurement method: an independent subprocess per T; first walk T steps token by
 - Short-context (T<512) decoding **is not an advantageous scenario**, and kernel fusion has no gain there (§22.5)—both routes are ineffective for short contexts, which is jointly determined by the architecture and execution overhead, not an implementation issue.
 - **Long-context decoding is the architecture-level payoff point**: crossover at T≈512, 2.36× faster at T=4096, and the gap continues to widen with T (Transformer's single step ∝t has no upper bound, SunnyNet's is constant). This is an advantage obtainable without any kernel.
 - Boundaries of this conclusion: **single sequence, B=1, randomly initialized model, median of 2 rounds**. Real serving is batched decoding, and the ratio will change (as batch grows, Transformer's per-step attention can be amortized in parallel, narrowing the advantage); the batched protocol was not measured. It also excludes engineering optimizations such as KV cache quantization/paging (§20.3).
-- **The only comparison object in this section is Transformer**. If decoding mode is compared head-to-head against O(N) peers that are also O(1), SunnyNet is not ahead (§23.3 measured: rwkv is 1st throughout decoding, 1.6–2.6× faster). The scope in which the "inference advantage" holds is "relative to Transformer" and excludes peers.
+- **The only comparison object in this section is Transformer**. If decoding mode is compared head-to-head against O(N) peers that are also O(1), SunnyNet is not ahead on the same torch implementation (§23.3 measured: rwkv is 2nd throughout, 1.73–2.16× faster than `sunny` (torch)); with the whole-model C backend it is 1st at every length. The scope in which the "inference advantage" holds is "relative to Transformer", and the torch path excludes peers.
 
 ---
 
@@ -1811,12 +1811,13 @@ The six comparison architectures: `h3`, `rwkv`, `mamba`, `hyena`, `linear_attn`,
 | **Training speed** (L=6 layer-aligned) | **behind** | rwkv | 30–40% slower | §16.5 |
 | **Training-mode memory** (T=1024) | 2nd lowest | rwkv 1611MB | 12% higher, 43% lower than TF | §17 |
 | **Forward ms/token** (batch=1) | improves with T, 6th→3rd | hyena | never tops the list, still 1.92× slower than hyena at T=4096 | §10.6 |
-| **Decoding ms/step** (B=1) | 5th→2nd | **rwkv** | 1.85–2.58× slower | §23.3 |
+| **Decoding ms/step** (B=1, torch path) | 7th of 8 | **rwkv** | 1.73–2.16× slower | §23.3 |
+| **Decoding ms/step** (B=1, whole-model C runtime) | **1st of 8** | sunnynet | 1.02–1.15× faster than rwkv | §23.3 |
 | **Long-distance retrieval** (code domain) | level with TF | tie | far bucket ngram=4 is 0.1208 for both | §8.2 |
 | **Long-distance retrieval** (natural language) | near 0 | — | no advantage | §8.3 |
 | **Cross-distribution generalization** | 1st on Chinese new domain / 2nd on English | sunnynet | OOD drop 1.480, lowest bracket | §18.1 |
 
-**In one sentence**: SunnyNet is currently competitive in quality (20M) and training memory, statistically level with rwkv in training speed (only at L=4), and **behind rwkv/hyena in both forward and decoding speed**—"comprehensive superiority" has no support in any single column of data.
+**In one sentence**: SunnyNet is currently competitive in quality (20M) and training memory, statistically level with rwkv in training speed (only at L=4), and **behind hyena in forward speed** and behind rwkv on the same-torch decode path; the only table it tops in decoding comes from the whole-model C backend, which is not at the same implementation level as the torch path—"comprehensive superiority" has no support in any single column of data.
 
 ### 23.2 Five Protocol Flaws in the Earlier Comparisons
 
@@ -1828,58 +1829,67 @@ The six comparison architectures: `h3`, `rwkv`, `mamba`, `hyena`, `linear_attn`,
 | 4 | Quality comparisons had **few steps, no convergence, single seed** | Can only be read as early sample efficiency | Noted in each section, not used as a final quality ranking |
 | 5 | Some speed data **included external load** | Single cells inflated by up to 2× | Independent subprocess per cell already implemented |
 
-### 23.3 Seven-Architecture Comparison in Decoding Mode
+### 23.3 Eight-Path Comparison in Decoding Mode
 
-Protocol: an independent subprocess per (architecture, T); first walk T steps token by token to build a real decoding state (not timed), then measure the single-step decoding ms at that context length; single-threaded (§22.5 already showed a tendency for single-threaded to beat multi-threaded in decoding mode); 2 rounds taking the median. Stack parameters aligned to 365,844. Script `experiments/_decode_seven.py`, data `experiments/results/_decode_seven.json`.
+Protocol: an independent subprocess per (path, T); first walk T steps token by token to build a real decoding state (not timed), then measure the single-step decoding ms at that context length; single-threaded (§22.5 already showed a tendency for single-threaded to beat multi-threaded in decoding mode); 2 rounds taking the median. Stack parameters aligned to 365,844. The eight paths include a whole-model C backend of the same specification (`sunnyC`, `d80` blob, one `sn_step` per token), listed separately from the torch path. Script `experiments/_decode_seven.py`, data `experiments/results/_decode_seven.json`.
+
+![Decode latency vs sequence length](figures/perf_decode.png)
 
 ms/step (lower is better):
 
-| Architecture | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
+| Path | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
 |---|---|---|---|---|---|
-| `rwkv` | **1.768** | **1.574** | **1.598** | **2.113** | **1.564** |
-| `h3` | 2.517 | 2.524 | 2.487 | 2.969 | 3.227 |
-| `transformer` | 2.550 | 2.667 | 3.426 | 5.049 | 6.219 |
-| `mamba` | 2.686 | 2.742 | 2.573 | 2.773 | 3.205 |
-| **`sunnynet`** | **3.279** | **4.067** | **3.086** | **3.331** | **2.854** |
-| `hyena` | 3.346 | 3.583 | 3.662 | 5.101 | 4.530 |
-| `linear_attn` | 4.061 | 3.452 | 4.599 | 3.676 | 3.624 |
+| **`sunnyC` (whole-model C)** | **1.560** | **1.630** | **1.547** | **1.518** | **1.647** |
+| `rwkv` | 1.779 | 1.879 | 1.673 | 1.675 | 1.674 |
+| `transformer` | 2.473 | 3.405 | 5.236 | 4.056 | 6.962 |
+| `h3` | 2.643 | 2.944 | 2.568 | 2.753 | 2.874 |
+| `mamba` | 3.160 | 3.063 | 2.845 | 3.171 | 3.897 |
+| `linear_attn` | 3.467 | 4.207 | 4.019 | 3.101 | 3.636 |
+| `sunny` (torch) | 3.778 | 3.973 | 3.166 | 3.624 | 2.889 |
+| `hyena` | 4.338 | 3.310 | 3.281 | 3.693 | 3.046 |
 
-Per-cell ranking (1=fastest):
+Per-cell ranking (1=fastest, of 8):
 
-| Architecture | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
+| Path | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
 |---|---|---|---|---|---|
-| `sunnynet` | 5/7 | 7/7 | 4/7 | 4/7 | **2/7** |
-| `transformer` | 3/7 | 3/7 | 5/7 | 6/7 | 7/7 |
-| `rwkv` | **1/7** | **1/7** | **1/7** | **1/7** | **1/7** |
+| `sunnyC` | **1/8** | **1/8** | **1/8** | **1/8** | **1/8** |
+| `rwkv` | 2/8 | 2/8 | 2/8 | 2/8 | 2/8 |
+| `h3` | 4/8 | 3/8 | 3/8 | 3/8 | 3/8 |
+| `transformer` | 3/8 | 6/8 | 8/8 | 8/8 | 8/8 |
+| `mamba` | 5/8 | 4/8 | 4/8 | 5/8 | 7/8 |
+| `linear_attn` | 6/8 | 8/8 | 7/8 | 4/8 | 6/8 |
+| `sunny` (torch) | 7/8 | 7/8 | 5/8 | 6/8 | 4/8 |
+| `hyena` | 8/8 | 5/8 | 6/8 | 7/8 | 5/8 |
 
-Ratio relative to SunnyNet (>1 = slower than SunnyNet):
+Ratio relative to `sunnyC` (>1 = slower than the whole-model C backend):
 
-| Architecture | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
+| Path | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
 |---|---|---|---|---|---|
-| `transformer` | 0.778 | 0.656 | 1.110 | 1.516 | **2.179** |
-| `rwkv` | **0.539** | **0.387** | **0.518** | **0.634** | **0.548** |
-| `mamba` | 0.819 | 0.674 | 0.834 | 0.832 | 1.123 |
-| `h3` | 0.768 | 0.620 | 0.806 | 0.891 | 1.131 |
-| `hyena` | 1.020 | 0.881 | 1.187 | 1.531 | 1.587 |
-| `linear_attn` | 1.238 | 0.849 | 1.490 | 1.104 | 1.270 |
+| `rwkv` | 1.140 | 1.153 | 1.081 | 1.104 | 1.016 |
+| `transformer` | 1.585 | 2.089 | 3.384 | 2.672 | **4.226** |
+| `h3` | 1.694 | 1.806 | 1.660 | 1.813 | 1.744 |
+| `mamba` | 2.026 | 1.879 | 1.839 | 2.089 | 2.366 |
+| `linear_attn` | 2.222 | 2.580 | 2.597 | 2.043 | 2.207 |
+| `sunny` (torch) | 2.422 | 2.437 | 2.046 | 2.387 | 1.754 |
+| `hyena` | 2.781 | 2.030 | 2.120 | 2.432 | 1.849 |
 
 **Reading**:
 
-1. **Transformer's O(t) is reproduced**: 2.550 → 6.219 ms (T grows 16×, single-step cost grows 2.44×); at T=4096 SunnyNet is 2.18× faster. Same direction as §22.10 (2.36×); the difference comes from this run's interleaved execution of five peers outside the process, and is normal jitter.
-2. **SunnyNet's single-step cost is roughly flat**: 3.279 → 2.854 ms, with drift of −13%~+24% relative to T=256 (the 4.067 at T=512 is the highest point). The flatness is weaker than §22.10's ±5%, because this run has more scenarios of repeatedly building seven models in the same process and hence more noise—but **the trend is still flat**, consistent with "O(1)".
-3. **The absolute best in decoding mode is rwkv, not SunnyNet**: rwkv is 1st at all 5 lengths, with a single step of 1.57–2.11 ms, **1.85–2.58×** faster than SunnyNet. Its wkv recurrence is pure element-wise `p*s+k*v`, with no scan and no log/exp chain.
-4. **SunnyNet's ranking improves with T (5→7→4→4→2)**, overtaking h3/mamba/hyena at long context, but **never catching up with rwkv**. hyena stays at the back in decoding mode because its long convolution window needs 64-tap element-wise multiply-add.
-5. **hyena's FFT long convolution is not worthwhile in decoding mode**: its whole-segment forward is the fastest of the seven architectures (§10.6), but in decoding mode it is 6th; the constant factor of rebuilding the FFT per token is far higher than that of its scan-class peers.
+1. **Transformer's O(t) is reproduced**: 2.473 → 6.962 ms (T grows 16×, single-step cost grows 2.82×); against the whole-model C backend it is **4.23×** slower at T=4096. Same direction as §22.10 (2.36×); the ratio is larger here because the C backend's baseline is lower than §22.10's torch single step.
+2. **The whole-model C backend's single-step cost is flat**: 1.560 → 1.647 ms, drift of −3%~+6% relative to T=256, and 1st at every length. Consistent with §22.10's ±5%.
+3. **On the same torch implementation SunnyNet does not match rwkv**: `sunny` (torch) ranks 7/7/5/6/4, and rwkv is 2nd at all five lengths, **1.73–2.16×** faster than `sunny` (torch). Its wkv recurrence is pure element-wise `p*s+k*v`, with no scan and no log/exp chain.
+4. **The whole-model C backend reverses the ordering**: `sunnyC` is 1st at all five lengths, **1.02–1.15×** faster than rwkv. The reversal comes from eliminating roughly 1100 aten calls per step (§24.7), **not from a change in architectural operator count**—the two paths must be quoted separately.
+5. **hyena's FFT long convolution is not worthwhile in decoding mode**: its whole-segment forward is the fastest of the seven architectures (§10.6), but in decoding mode it is 8th/6th; the constant factor of rebuilding the FFT per token is far higher than that of its scan-class peers.
 
 **Conclusion**:
 
-- **SunnyNet is currently not the fastest architecture at decoding**. It is faster than Transformer (and the longer the more so), but 1.85–2.58× slower than rwkv and about 1.0–1.13× slower than mamba/h3 (overtaking them at long context). §22.10's "inference advantage" holds only in the comparison "against Transformer".
-- **rwkv is currently the opponent that most needs catching up in decoding mode**. Its advantage comes from **a low operator count**—its single step has only one element-wise chain `p*s+k*v`, whereas SunnyNet's single step contains competitive gating (3 sigmoids), gating probability, scan, and `W_c`/`W_s` feedback, so its element-wise operator count is several times larger. This is the same root cause as the training-mode "the bottleneck is operator count, not FLOPs" (§13.3/§16.5).
-- Boundaries: B=1, random initialization, median of 2 rounds, no batched decoding and no KV cache quantization/paging.
+- **The decoding advantage comes from two distinct sources that must not be conflated**. On the same torch implementation, SunnyNet is faster than Transformer (and the longer the more so) but 1.73–2.16× slower than rwkv; switching to the whole-model C backend drops the single step to 1.52–1.65 ms, 1st at every length, 1.02–1.15× faster than rwkv. §22.10's "inference advantage" holds only in the comparison "against Transformer" and does not cover the rwkv column.
+- **rwkv remains the opponent to catch on the torch path**. Its advantage comes from **a low operator count**—its single step has only one element-wise chain `p*s+k*v`, whereas SunnyNet's single step contains competitive gating (3 sigmoids), gating probability, scan, and `W_c`/`W_s` feedback, so its element-wise operator count is several times larger. This is the same root cause as the training-mode "the bottleneck is operator count, not FLOPs" (§13.3/§16.5); the C backend overtakes precisely because it folds that operator chain into one `sn_step` call.
+- Boundaries: B=1, random initialization, median of 2 rounds, no batched decoding and no KV cache quantization/paging. `sunnyC` and the other seven are not at the same implementation level (C kernel vs PyTorch); comparisons across that column must carry the caveat.
 
 ### 23.4 Merging the Root Cause of the Gaps
 
-Among the ten dimensions, those where SunnyNet is behind or merely level are: decoding speed (behind rwkv), forward speed (behind hyena), L=6 training speed (behind by 30–40%), 100M quality (behind rwkv by 3.6%), 1.4M quality (behind h3 by 7.2%), natural-language long-distance retrieval (no advantage). These **converge to the same root cause**: **element-wise operator count**.
+Among the ten dimensions, those where SunnyNet is behind or merely level are: decoding speed (behind rwkv on the same torch implementation), forward speed (behind hyena), L=6 training speed (behind by 30–40%), 100M quality (behind rwkv by 3.6%), 1.4M quality (behind h3 by 7.2%), natural-language long-distance retrieval (no advantage). These **converge to the same root cause**: **element-wise operator count**.
 
 | Evidence | Number |
 |---|---|
@@ -2026,7 +2036,7 @@ and the cost of cross-language calls and state movement is the same order as a s
 arguments at 0.28µs, 8 arguments at 2.02µs, against a torch single operator at 2.42µs). The kernel's 9.90× gain comes from eliminating the
 inter-chunk serial dependency and the `exp(-P)` intermediate tensor, which holds in **long-sequence scans across segments**, but not in B=1 single-step decoding.
 
-A B=1 single sequence is also not the Runtime's target scenario (§23.3: in the decoding state the best is rwkv).
+A B=1 single sequence is also not the Runtime's target scenario (§23.3: on the same torch implementation the decoding-state best is rwkv).
 
 ### 24.7 Whole-model C decoding: moving the entire forward into C
 
@@ -2114,6 +2124,16 @@ unaffected. GEMV is changed to contiguous reads parallelized along output channe
 bandwidth; measured 6 physical cores 26.69 ms vs 12 logical cores 36.05 ms (26% difference). A
 `sn_recommended_threads()` was added on the C side: on Windows it uses `GetLogicalProcessorInformation` to count
 `RelationProcessorCore`, on Linux it parses `/proc/cpuinfo` and deduplicates `(physical id, core id)`.
+
+**The optimal thread count is set by weight size, not a fixed value.** Sweeping threads per blob tier on the same
+machine (`experiments/_decode_cthreads_size.py`, an independent process per tier):
+
+![Decode thread policy](figures/perf_threads.png)
+
+At ≤23 MB (d80–d256) **a single thread is optimal**: the weights fit in cache and parallelism only adds synchronization
+overhead (d128 single thread 1.70 ms vs 4 threads 2.96 ms). From ≥39 MB (d384 up) the weights exceed cache capacity and the
+step becomes memory-access bound, where **physical cores win** (d768 single thread 9.84 ms vs 6 threads 7.65 ms). The
+boundary sits near 32 MB, so `threads_for_blob()` picks by blob byte count rather than always taking the core count.
 
 **A/B comparison** (`experiments/_ab_runtime_opt.py`: the pre-optimization library is checked out of `git show` and compiled separately,
 same blob, same 32-token sequence, 5 interleaved head-to-head rounds):
@@ -3234,6 +3254,12 @@ rounds taking the median):
 Least squares: **`step_ms ≈ 32.9·L + 102.4`** (marginal 33 ms per layer, layer-count-independent
 intercept 102 ms).
 ⇒ The depth cost is **linear with a constant slope**, not "exploding after some layer".
+
+![Scale and depth](figures/perf_scaling.png)
+
+Left is stack parameters vs validation ppl (1.4M / 20M / 100M): **not monotonic**, 20M is the worst and 100M recovers,
+but the three tiers use different step budgets (600 / 300 / 100), so read the trend only and never subtract across tiers.
+Right is the fit of the cost law above.
 
 ### 28.3 The Slope Comes from Per-Layer Fixed Operator Dispatch, Not FLOPs
 

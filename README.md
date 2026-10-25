@@ -64,7 +64,7 @@ All numbers are measured on one machine (i7-8750H, AVX2, PyTorch 2.14.1 CPU) wit
 |---|---|---|---|
 | Training step, ms/token | 0.0953 | RWKV 0.0982 | T=256, batch 8, tied over 9 paired rounds |
 | Quality, ppl | 57.83 (2nd of 7) | H3 53.93 | 600 steps, single seed, not converged |
-| Decode, ms/step at T=4096 (torch path) | 2.85 | RWKV 1.56 | B=1, single sequence |
+| Decode, ms/step at T=4096 (torch path) | 2.89 | RWKV 1.67 | B=1, single sequence |
 | Decode, ms/step (whole-model C runtime) | **1.65 at T=4096** | — | B=1, first of 8 at every length |
 | Forward, ms/token at T=4096 | 0.0352 | Hyena 0.0184 | batch=1, pure forward |
 
@@ -118,7 +118,7 @@ Compared against `h3`, `rwkv`, `mamba`, `hyena`, `linear_attn`, and `transformer
 | Training speed (L=6, layers aligned) | **behind** | rwkv | 30–40% slower |
 | Training-mode memory (T=1024) | 2nd lowest | rwkv 1611MB | 12% higher, 43% below the Transformer |
 | Forward ms/token (batch=1) | 6th → 3rd with T | hyena | never tops the table |
-| Decode ms/step (B=1, torch path) | 5th → 2nd | rwkv | 1.9–2.6× slower |
+| Decode ms/step (B=1, torch path) | 7th of 8 | rwkv | 1.73–2.16× slower |
 | **Decode ms/step (B=1, whole-model C runtime)** | **1st of 8** | sunnynet | 1.02–1.15× faster than rwkv |
 | Long-range retrieval (code) | tied with the Transformer | — | — |
 | Long-range retrieval (natural language) | near zero | — | no advantage |
@@ -133,7 +133,7 @@ The dimensions where SunnyNet lags or only ties — decode speed on the torch pa
 - The scaling trend is not monotonic: 2nd at 1.4M, 1st at 20M, 2nd at 100M.
 - Long-range retrieval is verified only on structured text (code, far-bucket hit 0.13); on natural language it is near zero.
 - No GPU kernel. The architecture runs on CUDA unmodified (8.0–15.2× forward on a GTX 1060), but there is no Triton or CUDA implementation.
-- On the torch decode path, speed is not competitive against O(N) peers: RWKV decodes 1.9–2.6× faster at every length tested. The shipped whole-model C runtime reverses this ordering; the two paths must be quoted separately.
+- On the torch decode path, speed is not competitive against O(N) peers: RWKV decodes 1.73–2.16× faster at every length tested. The shipped whole-model C runtime reverses this ordering (1st at every length); the two paths must be quoted separately.
 - Coherence ("incoherence") has two independent causes, both measured: a training-budget deficit (the external Kaggle run had 0.96 token/parameter against a Chinchilla suggestion of 20, a 20.8× gap) and a recall-capacity ceiling of the elementwise state (2 key-value pairs: recurrence 4.7% vs attention 93.4% accuracy). A same-budget controlled run shows the recurrence baseline at ppl 143.24 versus 140.40 for a Transformer with matched stack parameters — the gap is the budget, not the recurrence. Adding a semi-count associative-memory branch lowers zh ppl to 138.82 (−3.1%) and is the only configuration that improves generation coherence. Inter-layer dilution is a separate, depth-only effect: on a 100M checkpoint the input-specific energy share falls 0.226 → 0.035 from layer 0 to layer 7, and normalizing the state plus its feedback source raises 24-input argmax variety from 12 to 16 and lowers val ppl 200.51 → 198.33. Residual-stream normalization is falsified (ppl 263 → 625). The tail layer of that dilution is not yet resolved.
 
 ### CPU inference runtime
@@ -177,6 +177,17 @@ All three run their whole forward pass in C via `--hf-arch {mamba2|deltanet|gla}
 
 **OpenAI-compatible HTTP server** (`sunnynet/serve.py`): zero-dependency (standard-library `ThreadingHTTPServer`), exposing `GET /v1/models`, `POST /v1/chat/completions` (with `stream: true`), `POST /v1/completions`, and `GET /health`. Backends are selected through an `Engine` abstraction (`HFEngine` / `GGUFEngine` / `GGUFCEngine` / `TorchEngine`); sampling is handled in the server. All four call styles of the official `openai` SDK were verified, and 400/404 handling is correct.
 
+**Docker image** (`Dockerfile`, `python:3.11-slim`): the build stage installs gcc and compiles the kernels into a Linux `.so` (the PyPI wheel carries prebuilt libraries for win-x86_64 only, so Linux always builds from source); the runtime stage keeps `libgomp1` and no compiler. Weights are mounted at run time:
+
+```bash
+docker build -t sunnynet .
+docker run --rm -p 8080:8080 -v "$PWD/sunnynet-small-zh:/models" sunnynet \
+    --ckpt /models/sunnynet-small-zh.pt --tokenizer /models/tokenizer.json \
+    --host 0.0.0.0 --port 8080
+```
+
+On a tag push, `.github/workflows/docker.yml` builds and pushes `ghcr.io/sunnyclaw-cx/sunnynet` (linux/amd64 only; the kernels target x86-64-v3).
+
 **Ollama / LM Studio** (`sunnynet/integrate.py`): both run llama.cpp and need GGUF with a supported architecture. RWKV-7 GGUF is recognized directly. Three pitfalls are recorded: an explicit `TEMPLATE` is required (Ollama's built-in `rwkv-world` template wraps another `User:`/`Assistant:` layer and the output degenerates into repetition); `Error: could not locate ollama app` actually means the server is not running; and `OLLAMA_MODELS` must match the server's. Local probes bypass the system HTTP proxy.
 
 CLI:
@@ -213,6 +224,19 @@ SunnyNet is an independent original architecture, with two points stated plainly
 Four design conclusions were overturned by measurement and corrected: softmax channel competition drove the gradient to zero with depth; the sign of the spectral-radius depth decay was inverted; CenteredScaleNorm's `s_min` was above the actual activation scale, degrading normalization to a constant scale; and excluding the residual caused the largest single quality loss. The corrections and their data are in `docs/ARCHITECTURE.md` §3/4/5, kept to show where each design constraint came from.
 
 ### Quick start
+
+Run the released small model without training anything:
+
+```bash
+pip install sunnynet-cx                                     # pulls torch + numpy
+hf download SunnyClaw-cx/SunnyNet --local-dir sunnynet-small-zh   # ~21 MB
+sunnynet --ckpt sunnynet-small-zh/sunnynet-small-zh.pt \
+    --tokenizer sunnynet-small-zh/tokenizer.json --prompt "子曰：" --max-new 60
+```
+
+`hf` ships with `huggingface_hub`. The checkpoint is a 1.4M-parameter model (dim 128, 4 layers, vocab 8192) trained 16000 steps on the bundled Chinese corpus (val ppl 139.4); it emits classical Chinese. Add `--backend c --blob sunnynet-small-zh/sunnynet-small-zh.runtime.bin` to decode through the C runtime instead of torch.
+
+To build the environment from scratch and train your own:
 
 Requirements: Python ≥ 3.10, PyTorch ≥ 2.1 (CPU build is enough, no GPU needed), numpy.
 
@@ -330,6 +354,22 @@ Copyright 2026 sunny-cx
 ---
 
 ## 快速开始
+
+### 直接跑已发布的小权重
+
+无需自己训练，装完即可生成一句话：
+
+```bash
+pip install sunnynet-cx                                          # 会一并装 torch + numpy
+hf download SunnyClaw-cx/SunnyNet --local-dir sunnynet-small-zh  # 约 21 MB
+sunnynet --ckpt sunnynet-small-zh/sunnynet-small-zh.pt \
+    --tokenizer sunnynet-small-zh/tokenizer.json --prompt "子曰：" --max-new 60
+```
+
+`hf` 随 `huggingface_hub` 一起装。这个权重是 1.4M 参数（dim 128、4 层、词表 8192），
+在本仓库中文语料上训 16000 步（验证 ppl 139.4），输出文言文。加
+`--backend c --blob sunnynet-small-zh/sunnynet-small-zh.runtime.bin`
+可改走 C 内核解码，不用 torch 前向。
 
 ### 环境
 
@@ -470,7 +510,8 @@ Xavier / Glorot / He / MSRA 初始化、LSTM / GRU 门控公式、SSM / HiPPO �
   差距随 T 继续拉大。不需内核即可获得。
 - 短上下文（T<512）解码不是优势场景，内核融合在此也无收益。
 - 边界：单条序列、B=1、随机初始化模型、2 轮中位，未测批处理解码，不含 KV cache 量化/分页。
-- 与 O(N) 同行同场对照见下节：SunnyNet 解码**不是最快**，rwkv 全程第 1、快 1.9–2.6×。
+- 与 O(N) 同行同场对照见下节：同一 torch 实现下 SunnyNet 解码落后 rwkv 1.73–2.16×；
+  换整模型 C 后端后单步全长度第 1，比 rwkv 快 1.02–1.15×。两条路径分列。
 
 ### 质量
 
@@ -586,37 +627,39 @@ OpenAI 服务经官方 SDK 四种调用方式全通过。**1520 步上限、单�
 | 训练速度（L=6 层数对齐） | **落后** | rwkv | 慢 30–40% |
 | 训练态内存（T=1024） | 第 2 低 | rwkv 1611MB | 高 12%，比 TF 低 43% |
 | 前向 ms/token（batch=1） | 第 6 → 第 3（随 T） | hyena | 全程未登顶 |
-| 解码 ms/step（B=1，torch 路径） | 第 5 → 第 2 | **rwkv** | 慢 1.9–2.6× |
+| 解码 ms/step（B=1，torch 路径） | 第 7 / 8 | **rwkv** | 慢 1.73–2.16× |
 | **解码 ms/step（B=1，整模型 C runtime）** | **第 1 / 8** | sunnynet | 比 rwkv 快 1.02–1.15× |
 | 长距离检索（代码域） | 与 TF 持平 | 并列 | — |
 | 长距离检索（自然语言） | 接近 0 | — | 无优势 |
 | 跨分布泛化 | 中文新域第 1 / 英文第 2 | sunnynet | — |
 
-### 解码态七架构对照
+### 解码态八路径对照
 
-口径：每个 (架构, T) 独立子进程；先逐 token 走满 T 步建立真实解码状态（不计时），
-再测该长度下单步解码 ms；1 线程；2 轮取中位。
+口径：每个 (路径, T) 独立子进程；先逐 token 走满 T 步建立真实解码状态（不计时），
+再测该长度下单步解码 ms；1 线程；2 轮取中位。含同一规格的整模型 C 后端（`sunnyC`）。
 
 ms/step（越低越好）：
 
-| 架构 | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
+| 路径 | T=256 | T=512 | T=1024 | T=2048 | T=4096 |
 |---|---|---|---|---|---|
-| `rwkv` | **1.768** | **1.574** | **1.598** | **2.113** | **1.564** |
-| `h3` | 2.517 | 2.524 | 2.487 | 2.969 | 3.227 |
-| `transformer` | 2.550 | 2.667 | 3.426 | 5.049 | 6.219 |
-| `mamba` | 2.686 | 2.742 | 2.573 | 2.773 | 3.205 |
-| **`sunnynet`** | **3.279** | **4.067** | **3.086** | **3.331** | **2.854** |
-| `hyena` | 3.346 | 3.583 | 3.662 | 5.101 | 4.530 |
-| `linear_attn` | 4.061 | 3.452 | 4.599 | 3.676 | 3.624 |
+| **`sunnyC`（整模型 C）** | **1.560** | **1.630** | **1.547** | **1.518** | **1.647** |
+| `rwkv` | 1.779 | 1.879 | 1.673 | 1.675 | 1.674 |
+| `transformer` | 2.473 | 3.405 | 5.236 | 4.056 | 6.962 |
+| `h3` | 2.643 | 2.944 | 2.568 | 2.753 | 2.874 |
+| `mamba` | 3.160 | 3.063 | 2.845 | 3.171 | 3.897 |
+| `linear_attn` | 3.467 | 4.207 | 4.019 | 3.101 | 3.636 |
+| `sunny`（torch） | 3.778 | 3.973 | 3.166 | 3.624 | 2.889 |
+| `hyena` | 4.338 | 3.310 | 3.281 | 3.693 | 3.046 |
 
 读数：
 
-- Transformer 的 O(t) 被复现（2.550 → 6.219 ms），T=4096 时 SunnyNet 快 2.18×。
-- SunnyNet 单步成本大致平坦，排名随 T 改善（5→7→4→4→2），但**从未追上 rwkv**。
-- **解码态最优是 rwkv**（1.57–2.11 ms），单步只有一条 `p*s + k*v` 逐元素链；
-  SunnyNet 单步含竞争门控（3 次 sigmoid）、门控概率、扫描、反馈支路，算子数是它的数倍。
-- 五个 O(N) 同行此前都无单步解码接口，本仓库为其实现 `init_state`/`step`，
-  与整段前向数值一致性 maxdiff ≤ 4e-05。
+- Transformer 的 O(t) 被复现（2.473 → 6.962 ms）；对整模型 C 后端 T=4096 慢 **4.23×**。
+- 整模型 C 后端单步平坦（1.56 → 1.65 ms），全 5 个长度第 1，比 rwkv 快 1.02–1.15×。
+- **同一 torch 实现下打不平 rwkv**：`sunny`(torch) 全程落后，rwkv 快 1.73–2.16×。
+  差异来源是算子数——rwkv 单步只有 `p*s + k*v` 一条逐元素链，SunnyNet 含竞争门控
+  （3 次 sigmoid）、门控概率、扫描、`W_c`/`W_s` 反馈。C 后端反超正是因为它把这一串
+  算子收进一次 `sn_step` 调用（消除每步约 1100 次 aten 调用），**不是架构的改变**。
+- 两条路径必须分开陈述；`sunnyC` 与其余七条不是同一实现层级（C 内核 vs PyTorch）。
 
 ### 差距的共同根因
 
@@ -673,7 +716,7 @@ Hyena 是长卷积（FIR）递推，不属一阶状态递推，需独立卷积�
 **边界**：这是**批量跨段扫描**口径（B=1、整段 T）。接入 B=1 单步解码后收益消失
 （四格比值 1.023 / 1.072 / 0.897 / 1.073，方向不一致，8 线程 T=256 反慢 10.3%），
 ⇒ 不得声称端到端解码加速。原因：模型侧 T=1、B=1，跨语言调用与状态搬运成本
-与单算子同量级。B=1 单序列也不是本 Runtime 的目标场景（解码态最优是 rwkv）。
+与单算子同量级。B=1 单序列也不是本 Runtime 的目标场景（同一 torch 实现下解码态最优是 rwkv）。
 
 ### 整模型 C 解码（`sunnynet/runtime/sunnynet.c`）
 
@@ -966,6 +1009,20 @@ sunnynet-serve --hf-dir <模型目录> --hf-arch gla --port 8080        # GLA
 
 实测（本地启动后）：官方 `openai` SDK 的 `models.list`、chat 非流式、chat 流式、
 legacy completions 四种调用全部通过；400（缺字段）/ 404（未知路径）错误处理正常。
+
+Docker 镜像（`Dockerfile`，`python:3.11-slim`）：构建阶段装 gcc 把内核编成
+Linux `.so`（PyPI 的 wheel 只带 win-x86_64 预编译库，Linux 侧一律源码编译），
+运行层只留 `libgomp1`，不带编译器。权重在运行期挂载：
+
+```bash
+docker build -t sunnynet .
+docker run --rm -p 8080:8080 -v "$PWD/sunnynet-small-zh:/models" sunnynet \
+    --ckpt /models/sunnynet-small-zh.pt --tokenizer /models/tokenizer.json \
+    --host 0.0.0.0 --port 8080
+```
+
+打 tag 后由 `.github/workflows/docker.yml` 自动构建并推送
+`ghcr.io/sunnyclaw-cx/sunnynet`（仅 linux/amd64，内核指令集为 x86-64-v3）。
 
 ### Ollama / LM Studio 接入（`sunnynet/integrate.py`）
 

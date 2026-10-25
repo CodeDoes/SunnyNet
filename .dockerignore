@@ -1,0 +1,16 @@
+.git
+.github
+.workbuddy
+.ref
+.pytest_cache
+.pytest_tmp
+__pycache__
+*.egg-info
+build
+dist
+data
+runs
+results
+experiments
+docs
+kaggle
