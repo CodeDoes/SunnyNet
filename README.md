@@ -171,7 +171,7 @@ All three run their whole forward pass in C via `--hf-arch {mamba2|deltanet|gla}
 
 **Decode parallelism scales with weight size**: small models keep weights in cache, so extra threads only add synchronization. Blobs ≤23 MB are fastest single-threaded, blobs ≥39 MB are fastest on physical cores (136 MB gains 1.29×). The CLI selects this from the blob size; `--threads` overrides. On the 100M-class blob (467.6 MB), row-major weight layout plus output-channel-parallel GEMV lifts the effective bandwidth from 6.10 to 18.18 GB/s and the single step from 76.60 to 25.72 ms (2.98×, C wins 5/5 rounds; logits max|diff| 2.766e-05, argmax 32/32). Parallelism takes physical cores, not logical ones: 6 cores 26.69 ms versus 12 logical cores 36.05 ms.
 
-**AVX-512 and NEON**: source for both backends is included, each with forward scan, reverse scan and single step. AVX-512 uses `__mmask16` for masked tails and exports CPUID detection; this CPU reports AVX512F=0 (i7-8750H, Coffee Lake), so only the build is verified (198 `zmm` registers, 16 `vfmadd132ps` in the disassembly) and the loader raises rather than executes an illegal instruction. NEON has no local ARM toolchain and no QEMU, so it is cross-compiled with `zig cc` to an AArch64 ELF64 (capstone confirms 4-lane `fmla`); real execution runs on the CI `ubuntu-24.04-arm` runner.
+**AVX-512 and NEON**: source for both backends is included, each with forward scan, reverse scan and single step. AVX-512 is split as `scan_avx512.c` plus `core_avx512.c` / `step_avx512.c`, where one 512-bit register holds two groups of eight lanes and the in-group neighbour shift is a 16-lane `vpermps`; masked accesses handle a tail when `D` is not a multiple of 16. This CPU reports AVX512F=0 (i7-8750H, Coffee Lake), so only the build is verified — disassembling `core_avx512.c` alone gives 192 `zmm` occurrences and 10 `vfmadd*ps`; linking it with `step_avx512.c` gives 315 `zmm`, 44 `vfmadd*ps`, 16 `vpermps` and 33 masked moves — and the loader raises rather than executing an illegal instruction. Because neither an AVX-512 CPU nor an ARM device exists here, the indexing and in-group semantics of both sources are executed on x86 through same-named scalar shims (`experiments/_avx512_shim/`, `experiments/_neon_shim/`); they agree with the torch reference to 1.19e-07 and the NEON scan is bit-identical. That rules out mis-indexed channels that stay in bounds; it does not prove floating-point behaviour or throughput on real hardware. NEON is cross-compiled with `zig cc` to an AArch64 ELF64 and an ARMv7 ELF32; ARMv7 does not define `__ARM_FEATURE_FMA`, so the kernel falls back to `vaddq_f32 + vmulq_f32` (`vmla.f32` instead of `vfma.f32`).
 
 **Stable C ABI** (`sunnynet/runtime/sn_abi.h`): symbols carry the `sn_abi_` prefix, handles are opaque, version is `(MAJOR<<16)|(MINOR<<8)|PATCH` at 1.0.0, with `SN_CAP_*` capability bits and `SN_OK` / `SN_E_INVAL` / `SN_E_UNSUPPORTED` codes. The ctypes binding in `sunnynet/runtime/abi.py` is bit-identical to the internal handle path (`max|diff| = 0.0`), and 9 contract tests pass.
 
@@ -231,7 +231,7 @@ st = m.reset(m.init_state())
 logits = m.step(token, st)                  # O(1) per step
 ```
 
-**Roadmap.** Existing assets: the original architecture, the AVX2 fused kernel (training step 1.10–1.17×), the generic recurrent C runtime (9.9× median against a vectorized baseline), whole-model C single-step decode (B=1 single thread 1.53–2.05×), cross-architecture mapping verification, GGUF read plus RWKV-7 weights (numerically equivalent to the official `.pth`), the RWKV-7 whole-model C kernel (5.39× over numpy, 7.49× at 8 threads), INT4 quantization (2.83× end-to-end), official Mamba-2 / DeltaNet / GLA weights (numerically aligned, coherent greedy generation), AVX-512 and NEON kernel source, the OpenAI-compatible server, Ollama / LM Studio integration, and the stable C ABI. Near term: weight release via `sunnynet-release`. Mid term: a matrix-valued rank-1 recurrence kernel to bring RWKV-7 and DeltaNet single-step into C (Mamba-2 and GLA can reuse the existing recurrence). Not planned: replicating llama.cpp's general tensor-operator layer, or matching Transformers / vLLM head-on.
+**Roadmap.** Existing assets: the original architecture, the AVX2 fused kernel (training step 1.10–1.17×), the generic recurrent C runtime (9.9× median against a vectorized baseline), whole-model C single-step decode (B=1 single thread 1.53–2.05×), cross-architecture mapping verification, GGUF read plus RWKV-7 weights (numerically equivalent to the official `.pth`), the RWKV-7 whole-model C kernel (5.39× over numpy, 7.49× at 8 threads), INT4 quantization (2.83× end-to-end), official Mamba-2 / DeltaNet / GLA weights (numerically aligned, coherent greedy generation), AVX-512 and NEON kernel source (compiled, plus shim-executed equivalence), one-command GGUF into the C kernel (`sunnynet chat -m x.gguf`, blob exported and cached automatically), the `chat` / `serve` / `convert` / `quantize` / `info` subcommands, GGUF quantization with perplexity, the OpenAI-compatible server, a native Ollama API server, Ollama / LM Studio integration, and the stable C ABI. Near term: weight release via `sunnynet-release`. Mid term: a matrix-valued rank-1 recurrence kernel to bring RWKV-7 and DeltaNet single-step into C (Mamba-2 and GLA can reuse the existing recurrence). Not planned: replicating llama.cpp's general tensor-operator layer, or matching Transformers / vLLM head-on. Verification protocols, items pending real hardware, and what was left out are in [docs/ROADMAP.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ROADMAP.md).
 
 ### Originality
 
@@ -1107,33 +1107,51 @@ sunnynet-integrate ollama <model.gguf> --name sunnynet-rwkv7 --run --smoke
 LM Studio 无需 GGUF 转换的另一条路：把 `sunnynet-serve` 配成自定义 OpenAI 兼容
 endpoint（`Developer` → 添加 endpoint），配置由 `sunnynet-integrate lmstudio` 生成。
 
-### AVX-512 与 NEON 内核（`sunnynet/kernels/scan_avx512.c`、`scan_neon.c`）
+### AVX-512 与 NEON 内核（`sunnynet/kernels/scan_avx512.c`、`core_avx512.c`、`step_avx512.c`、`scan_neon.c`）
 
 AVX2/FMA 之外补两条 SIMD 后端源码，均含前向扫描、反向扫描、单步三个入口。
 
-AVX-512（F/BW/VL）：用 `__mmask16` 做掩码尾处理，导出 CPUID 探测
-（leaf 7 EBX bit16）与 ISA 字符串。**本机 CPU 实测 AVX512F=0**（i7-8750H，Coffee Lake），
-故只做编译与产物验证，不做执行验证：
+AVX-512（F/BW/VL）拆成 `scan_avx512.c`（512 位扫描）与 `core_avx512.c` / `step_avx512.c`
+（融合内核与推理态单步）：一个 512 位寄存器装**两个 group（2×8 lane）**，组内相邻元素用
+16 lane 的 `vpermps` 做 lane 置换，两半区互不干扰；`D` 不是 16 倍数时用掩码处理尾部。
+导出 CPUID 探测（leaf 7 EBX bit16）与 ISA 字符串。**本机 CPU 实测 AVX512F=0**
+（i7-8750H，Coffee Lake），故只做编译与产物验证：
 
 | 验证项 | 结果 |
 |---|---|
-| 编译 | `gcc -O3 -mavx512f -mavx512bw -mavx512vl -shared` 通过 |
-| 反汇编 | 198 处 `zmm` 寄存器、16 处 `vfmadd132ps` |
+| 编译 | `gcc -O3 -mavx512f -mavx512bw -mavx512vl -mfma -funroll-loops -fopenmp -shared` 通过 |
+| 反汇编（`core_avx512.c` 单编） | 192 处 `zmm`、10 处 `vfmadd*ps`、12 处 `vpermps` |
+| 反汇编（与 `step_avx512.c` 合编） | 315 处 `zmm`、44 处 `vfmadd*ps`、16 处 `vpermps`、33 条掩码访存 |
 | 加载保护 | 不支持时 `load_avx512()` 直接抛错，避免非法指令 |
 
 NEON：无 ARM 工具链、无 QEMU（`wsl.exe` 被安全策略拦），改用 `zig cc` 真交叉编译：
 
 ```bash
 pip install ziglang
-python -c "from sunnynet.kernels.simd import cross_compile_neon; cross_compile_neon('<out.so>')"
+PYTHON=<venv python> bash scripts/build_arm.sh aarch64-linux-gnu
+PYTHON=<venv python> bash scripts/build_arm.sh arm-linux-gnueabihf
 ```
 
-| 验证项 | 结果 |
-|---|---|
-| 产物 | AArch64 ELF64（`e_machine=183`，`zig cc -target aarch64-linux-gnu`） |
-| 反汇编 | capstone 确认 4-lane `fmla v3.4s, v2.4s, v4.4s` 及 `fmul`/`fsub`/`fadd` |
+| 验证项 | AArch64 | ARMv7 |
+|---|---|---|
+| 产物 | 22264 B，ELF64，`e_machine=0xb7` | 881104 B，ELF32，`e_machine=0x28` |
+| 导出符号 | `scan_neon_f32` / `core_neon_fwd_f32` / `step_core_neon_f32` / `sn_neon_isa` 齐全 | 同左 |
+| `__ARM_FEATURE_FMA` | 定义 ⇒ `SN_FMA` 走 `vfmaq_f32` | 未定义 ⇒ 回退 `vaddq_f32+vmluq_f32`（`vmla.f32`） |
 
-**本机无法执行 NEON**，真实执行验证放在 CI 的 `ubuntu-24.04-arm` runner（原生 aarch64）。
+**本机既无 AVX-512 CPU 也无 ARM 设备**，改用同名标量 shim 在 x86 上执行**真内核源码**：
+`experiments/_avx512_shim/immintrin.h` 把 `__m512` 实现成 16 元数组、
+`_neon_shim/arm_neon.h` 把 `float32x4_t` 实现成 4 元数组，组内置换仍用源码里的真索引向量。
+
+| 内核 | 与 torch 参考 max\|diff\| |
+|---|---:|
+| AVX-512 core fwd（D=32，16 宽主循环 / D=24，8 宽尾部） | 1.19e-07 / 5.96e-08 |
+| AVX-512 step core（D=32 / D=24） | 1.19e-07 / 5.96e-08 |
+| AVX-512 dw step | 0.0 |
+| NEON scan | 0.0（逐位相同） |
+| NEON core fwd / step core | 1.19e-07 / 1.19e-07 |
+
+**边界**：只排除「索引写错但数值仍在界内」这类缺陷（例如 VEX 半区索引不分区），
+不证明真机浮点行为与吞吐。待真机复现项见 [docs/ROADMAP.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ROADMAP.md) §3.4。
 
 ### 稳定 C ABI（`sunnynet/runtime/sn_abi.h`、`sn_abi.c`）
 
@@ -1201,8 +1219,12 @@ logits = m.step(token, st)                 # 每步 O(1)
 **RWKV-7 整模型 C 内核（对 numpy 5.39×，8 线程 7.49×）**、
 **INT4 权重量化（端到端 2.83×，体积 2.7× 压缩）**、
 **Mamba-2 / DeltaNet / GLA 官方权重接入（数值对齐参考实现，贪心生成连贯）**、
-**AVX-512 与 NEON 内核源码（交叉编译 + 反汇编验证）**、
+**AVX-512 与 NEON 内核源码（编译 + shim 执行等价验证）**、
+**GGUF 一行命令走 C 内核（`sunnynet chat -m xxx.gguf`，blob 自动导出缓存）**、
+**CLI 子命令（`chat` / `serve` / `convert` / `quantize` / `info`）**、
+**GGUF 量化 + 困惑度评测（`sunnynet quantize`）**、
 **OpenAI 兼容 HTTP 服务（`sunnynet-serve`）**、
+**Ollama 原生 API 服务（`sunnynet/ollama.py`）**、
 **Ollama / LM Studio 接入（`sunnynet-integrate`）**、
 **C API 稳定 ABI（`sunnynet/runtime/sn_abi.h`，版本化 + 能力位 + 错误码）**。
 
@@ -1213,6 +1235,8 @@ logits = m.step(token, st)                 # 每步 O(1)
 
 不做的：复刻 llama.cpp 的通用张量算子层（GGML 为 Transformer 设计，逐算子调度）；
 打平 Transformers / vLLM（分别为模型仓库与 GPU 服务赛道）。
+
+各项验收口径、**待真机复现的性能项**与未做项见 [docs/ROADMAP.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ROADMAP.md)。
 
 ---
 
