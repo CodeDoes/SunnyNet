@@ -94,6 +94,10 @@ def main() -> int:
     )
     args = ap.parse_args()
 
+    # data/proc/ is gitignored and absent on a fresh clone; create it so the
+    # download target has a parent dir.
+    args.cache.parent.mkdir(parents=True, exist_ok=True)
+
     done = sorted(RAW_DIR.glob("ts_*.txt"))
     if done and not args.force:
         print(
@@ -114,9 +118,9 @@ def main() -> int:
                 print(
                     f"  [warn] interrupted ({type(e).__name__}); resuming next attempt"
                 )
-            if args.cache.stat().st_size >= EXPECT_SIZE:
+            if args.cache.exists() and args.cache.stat().st_size >= EXPECT_SIZE:
                 break
-        got = args.cache.stat().st_size
+        got = args.cache.stat().st_size if args.cache.exists() else 0
         if got < 1_000_000:
             sys.exit(f"  download too small ({got} B) - network blocked?")
         print(f"  raw file {got >> 20} MB / {EXPECT_SIZE >> 20} MB")

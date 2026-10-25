@@ -24,7 +24,9 @@ from pathlib import Path
 REPO_URL = "https://github.com/SunnyClaw-cx/SunnyNet"  # edit to your fork if needed
 REPO_DIR = "/kaggle/working/SunnyNet"
 
-PRESET = "proto20m"  # ~21M params (16.8M non-embed): small model over a simple big corpus
+PRESET = (
+    "proto20m"  # ~21M params (16.8M non-embed): small model over a simple big corpus
+)
 # ~150M training tokens ~= ~9 tokens/non-embed-param: deep past the coherence
 # threshold on this simple corpus, and safely inside the 9h P100 budget
 # (fetch+encode overhead ~2.5h + ~5.5h training at ~0.12-0.15 ms/token).
@@ -124,6 +126,7 @@ def main() -> int:
     ap.add_argument("--chunk-mb", type=float, default=CHUNK_MB)
     ap.add_argument("--cache", type=Path, default=ROOT / "data" / "proc" / "tiny_stories_train.txt")
     args = ap.parse_args()
+    args.cache.parent.mkdir(parents=True, exist_ok=True)
 
     got = args.cache.stat().st_size if args.cache.exists() else 0
     if got >= EXPECT_SIZE:
@@ -136,9 +139,9 @@ def main() -> int:
                 stream_download(TRAIN_URL, args.cache)
             except OSError as e:  # URLError / reset / timeout all resume
                 print(f"  [warn] interrupted ({type(e).__name__}); resuming next attempt")
-            if args.cache.stat().st_size >= EXPECT_SIZE:
+            if args.cache.exists() and args.cache.stat().st_size >= EXPECT_SIZE:
                 break
-        got = args.cache.stat().st_size
+        got = args.cache.stat().st_size if args.cache.exists() else 0
         if got < 1_000_000:
             sys.exit(f"  download too small ({got} B) - network blocked?")
         print(f"  raw file {got >> 20} MB / {EXPECT_SIZE >> 20} MB")
