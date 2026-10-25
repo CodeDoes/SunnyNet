@@ -27,7 +27,17 @@ __all__ = ["build_engine", "Engine", "serve", "main"]
 
 
 # --------------------------------------------------------------------- 采样
-def sample_logits(logits, temperature=1.0, top_p=1.0, top_k=0, rng=None):
+def sample_logits(logits, temperature=1.0, top_p=1.0, top_k=0, rng=None,
+                  repetition_penalty=1.0, seen=None):
+    if repetition_penalty and repetition_penalty != 1.0 and seen:
+        z = np.asarray(logits, dtype=np.float64).copy()
+        pen = float(repetition_penalty)
+        for tid in set(int(x) for x in seen):
+            if 0 <= tid < z.size:
+                z[tid] = z[tid] / pen if z[tid] > 0 else z[tid] * pen
+        if temperature is None or temperature <= 0:
+            return int(np.argmax(z))
+        logits = z
     if temperature is None or temperature <= 0:
         return int(np.argmax(logits))
     z = np.asarray(logits, dtype=np.float64) / float(temperature)
@@ -181,10 +191,13 @@ class GGUFCEngine(Engine):
         from .runtime.rwkv7 import RWKV7
         from .runtime.rwkv7_c import SnRWKV7
         tok = RWKV7(path)
-        bp = Path(blob) if blob else Path(path).with_suffix(
-            ".q4.bin" if quant == "int4" else ".runtime.bin")
-        if not bp.exists():
-            raise SystemExit(f"缺少权重 blob: {bp}")
+        if blob:
+            bp = Path(blob)
+            if not bp.exists():
+                raise SystemExit(f"缺少权重 blob: {bp}")
+        else:
+            from .runtime.blob import ensure_rwkv7_blob
+            bp = ensure_rwkv7_blob(path, quant=quant)
         self.model = SnRWKV7(bp, tok.vocab)
         self.tok = tok.tok
         self.name = "rwkv7-c"
@@ -252,7 +265,7 @@ def build_engine(args) -> Engine:
 
 # ------------------------------------------------------------------- 生成
 def generate_stream(engine, prompt_ids, max_tokens, temperature, top_p,
-                    top_k, seed, stops):
+                    top_k, seed, stops, repetition_penalty=1.0):
     """逐个 yield (token_id, 新增文本); 命中 eos/stop 即止."""
     state = engine.init_state()
     logits = None
@@ -262,7 +275,8 @@ def generate_stream(engine, prompt_ids, max_tokens, temperature, top_p,
     out_ids: list[int] = []
     prev_text = ""
     for _ in range(max_tokens):
-        nxt = sample_logits(logits, temperature, top_p, top_k, rng)
+        nxt = sample_logits(logits, temperature, top_p, top_k, rng,
+                            repetition_penalty, out_ids)
         if engine.eos is not None and nxt == int(engine.eos):
             break
         out_ids.append(nxt)
@@ -351,11 +365,15 @@ class _Handler(BaseHTTPRequestHandler):
             body = self._read_json()
         except ValueError as e:
             return self._err(400, str(e))
-        if path == "/v1/completions":
-            return self._completions(body, chat=False)
-        if path == "/v1/chat/completions":
-            return self._completions(body, chat=True)
-        self._err(404, f"未知路径 {self.path}", "not_found")
+        try:
+            if path == "/v1/completions":
+                return self._completions(body, chat=False)
+            if path == "/v1/chat/completions":
+                return self._completions(body, chat=True)
+            self._err(404, f"未知路径 {self.path}", "not_found")
+        except Exception as e:  # 参数非法等一律回 400, 不能让连接直接断
+            return self._err(400, f"{type(e).__name__}: {e}",
+                             "invalid_request_error")
 
     def _completions(self, body, chat: bool):
         if chat:
@@ -365,16 +383,26 @@ class _Handler(BaseHTTPRequestHandler):
         if not prompt:
             return self._err(400, "prompt/messages 为空")
 
-        max_tokens = int(body.get("max_tokens") or 64)
-        temperature = body.get("temperature")
-        temperature = 1.0 if temperature is None else float(temperature)
-        top_p = float(body.get("top_p") or 1.0)
-        top_k = int(body.get("top_k") or 0)
-        seed = body.get("seed")
-        stream = bool(body.get("stream", False))
-        stops = body.get("stop") or []
-        if isinstance(stops, str):
-            stops = [stops]
+        try:
+            max_tokens = int(body.get("max_tokens") or 64)
+            _t = body.get("temperature")
+            temperature = 1.0 if _t is None else float(_t)
+            top_p = float(body.get("top_p") or 1.0)
+            top_k = int(body.get("top_k") or 0)
+            seed = body.get("seed")
+            stream = bool(body.get("stream", False))
+            stops = body.get("stop") or []
+            if isinstance(stops, str):
+                stops = [stops]
+            _r = body.get("repetition_penalty")
+            rep = 1.0 if _r is None else float(_r)
+        except (TypeError, ValueError) as e:
+            return self._err(400, f"参数类型错误: {e}", "invalid_request_error")
+        if max_tokens < 0 or max_tokens > 8192:
+            return self._err(400, "max_tokens 需在 0..8192", "invalid_request_error")
+        if rep <= 0:
+            return self._err(400, "repetition_penalty 需 > 0",
+                             "invalid_request_error")
 
         try:
             ids = self.engine.encode(prompt)
@@ -387,9 +415,12 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
-            self.send_header("Connection", "keep-alive")
+            self.send_header("Connection", "close")
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
+            # 无 Content-Length 的流只能靠关闭连接收尾; HTTP/1.0 下声明
+            # keep-alive 会让读到 EOF 的客户端一直挂住
+            self.close_connection = True
 
             def sse(obj):
                 self.wfile.write(f"data: {json.dumps(obj, ensure_ascii=False)}\n\n"
@@ -404,7 +435,7 @@ class _Handler(BaseHTTPRequestHandler):
             try:
                 for _tok, delta in generate_stream(
                         self.engine, ids, max_tokens, temperature, top_p,
-                        top_k, seed, stops):
+                        top_k, seed, stops, rep):
                     if chat:
                         sse({"id": cid, "object": "chat.completion.chunk",
                              "created": int(time.time()), "model": model_id,
@@ -431,7 +462,8 @@ class _Handler(BaseHTTPRequestHandler):
 
         out_ids, text = [], ""
         for tok, _delta in generate_stream(self.engine, ids, max_tokens,
-                                           temperature, top_p, top_k, seed, stops):
+                                           temperature, top_p, top_k, seed,
+                                           stops, rep):
             out_ids.append(tok)
             text = self.engine.decode(out_ids)
         for s in stops:

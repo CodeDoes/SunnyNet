@@ -16,6 +16,7 @@ from pathlib import Path
 
 __all__ = [
     "avx512_available", "avx512_supported", "load_avx512",
+    "load_avx512_core", "avx512_core_compiles",
     "neon_available", "load_neon", "cross_compile_neon",
     "arch_name",
 ]
@@ -132,6 +133,84 @@ def _compile_avx512(gcc: str) -> Path:
         err = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")
         raise RuntimeError(f"AVX-512 编译失败: {err[-700:]}")
     return dll
+
+
+def _compile_avx512_core(gcc: str) -> Path:
+    """融合内核 + 单步内核; 两者编译到一个库里."""
+    BUILD.mkdir(parents=True, exist_ok=True)
+    dll = BUILD / ("sunnynet_core512.dll" if os.name == "nt"
+                   else "sunnynet_core512.so")
+    cmd = [gcc] + _AVX512_FLAGS
+    if os.name == "nt":
+        cmd += ["-static", "-shared"]
+    else:
+        cmd += ["-fPIC", "-shared"]
+    cmd += [str(HERE / "core_avx512.c"), str(HERE / "step_avx512.c"),
+            "-DSN_512_NO_COMMON", "-o", str(dll)]
+    r = subprocess.run(cmd, capture_output=True)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or b"").decode("utf-8", errors="replace")
+        raise RuntimeError(f"AVX-512 融合内核编译失败: {err[-700:]}")
+    return dll
+
+
+_lib512_core = None
+
+
+def load_avx512_core(force_rebuild: bool = False):
+    """加载 AVX-512 融合内核与单步内核; 本机不支持则抛 RuntimeError.
+
+    即使运行不了, 也可用 build_only=True 先确认能编译通过。
+    """
+    global _lib512_core
+    if _lib512_core is not None and not force_rebuild:
+        return _lib512_core
+    if not avx512_supported():
+        raise RuntimeError(
+            f"本机 CPU 不支持 AVX512F (arch={arch_name()}), 拒绝加载以免非法指令")
+    gcc = _find_gcc()
+    if gcc is None:
+        raise RuntimeError("未找到 C 编译器 (设 SUNNY_W64)")
+    dll = BUILD / ("sunnynet_core512.dll" if os.name == "nt"
+                   else "sunnynet_core512.so")
+    if force_rebuild or not dll.exists() or \
+            (HERE / "core_avx512.c").stat().st_mtime > dll.stat().st_mtime or \
+            (HERE / "step_avx512.c").stat().st_mtime > dll.stat().st_mtime:
+        dll = _compile_avx512_core(gcc)
+    lib = ctypes.CDLL(str(dll))
+    F, I, P = ctypes.POINTER(ctypes.c_float), ctypes.c_int, ctypes.c_char_p
+    lib.sn512_isa.restype = P
+    lib.sn512_set_threads.argtypes = [I]
+    lib.core512_fwd_f32.argtypes = [F, F, F, F, F, F, I, I, I]
+    lib.core512_bwd_f32.argtypes = [F, F, F, F, F, F, F, F, F, F, F, I, I, I]
+    lib.core512_fwd_tail_f32.argtypes = [F, F, F, F, F, F, I, I, I, I]
+    lib.step_core512_f32.argtypes = [F, F, F, F, F, I, I]
+    lib.step_core512_tail_f32.argtypes = [F, F, F, F, F, I, I, I]
+    lib.dw_step512_f32.argtypes = [F, F, F, F, I, I, I]
+    _lib512_core = lib
+    return lib
+
+
+def avx512_core_compiles(force: bool = False) -> tuple[bool, str]:
+    """只验证融合内核能否编译 (无 AVX-512 机器上唯一可做的检查).
+
+    返回 (ok, 说明). 编译产物落在 _build/, 不加载执行。
+    """
+    gcc = _find_gcc()
+    if gcc is None:
+        return False, "未找到 C 编译器"
+    try:
+        dll = _compile_avx512_core(gcc) if force else None
+        if dll is None:
+            dll = BUILD / ("sunnynet_core512.dll" if os.name == "nt"
+                           else "sunnynet_core512.so")
+            if not dll.exists() or \
+                    (HERE / "core_avx512.c").stat().st_mtime > dll.stat().st_mtime or \
+                    (HERE / "step_avx512.c").stat().st_mtime > dll.stat().st_mtime:
+                dll = _compile_avx512_core(gcc)
+        return True, str(dll)
+    except RuntimeError as e:
+        return False, str(e)
 
 
 _lib512 = None

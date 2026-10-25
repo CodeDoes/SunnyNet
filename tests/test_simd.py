@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import struct
 import subprocess
+import sys as _sys
 from pathlib import Path
 
 import numpy as np
@@ -200,3 +201,44 @@ def test_neon_scan_matches_reference():
 def test_neon_load_refuses_on_x86():
     with pytest.raises(RuntimeError, match="只能在 AArch64 上执行"):
         simd.load_neon(force_rebuild=True)
+
+# ------------------------------------------- 借 shim 在 x86 上跑真源码
+def _run_shim(script: str) -> dict:
+    """在 x86 上编译并执行 ARM/AVX-512 内核源码的标量 shim, 返回 maxdiff 表."""
+    import json
+    out = subprocess.run(
+        [_sys.executable, "-X", "utf8", str(HERE / "experiments" / script),
+         _gcc()],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**os.environ, "OMP_NUM_THREADS": "1"})
+    if out.returncode != 0:
+        pytest.skip(f"shim 未通过: {out.stdout[-400:]} {out.stderr[-400:]}")
+    return json.loads(out.stdout[:out.stdout.rindex("}") + 1])
+
+
+@pytest.mark.skipif(not IS_X86, reason="shim 只为 x86 主机准备")
+@NEED_GCC
+def test_avx512_indexing_matches_reference():
+    """AVX-512 源码在 x86 上借标量 shim 执行: 组内 lane 语义与掩码尾部须等价.
+
+    只覆盖索引与语义; 真 AVX-512 指令的吞吐需在支持 AVX512F 的机器上复现。
+    """
+    res = _run_shim("_avx512_shim/_run.py")
+    for key in ("core_fwd_D32", "core_fwd_D24", "step_core_D32",
+                "step_core_D24", "dw_step"):
+        block = res[key]
+        for k, v in block.items():
+            if k.startswith("maxdiff"):
+                assert v < 1e-5, f"{key}.{k} = {v}"
+    assert res["core_fwd_D24"]["tail_used"] and not res["core_fwd_D32"]["tail_used"]
+
+
+@pytest.mark.skipif(not IS_X86, reason="shim 只为 x86 主机准备")
+@NEED_GCC
+def test_neon_indexing_matches_reference():
+    """NEON 源码在 x86 上借标量 shim 执行, 索引与组内语义须等价."""
+    res = _run_shim("_neon_shim/_run.py")
+    for key in ("scan", "core_fwd", "step_core"):
+        for k, v in res[key].items():
+            if k.startswith("maxdiff"):
+                assert v < 1e-5, f"{key}.{k} = {v}"

@@ -1,0 +1,12 @@
+{
+  "models": [
+    "rwkv7-c"
+  ],
+  "completions": ", there was a little boy named Jack. He was a",
+  "chat": ", I'm a little confused about the \"I'm a",
+  "chat_stream": [
+    "ndi\nis a\nword\nthat\n",
+    10
+  ],
+  "bad_temperature": "BadRequestError: Error code: 400 - {'error': {'message': \"参数类型错误: could not convert string to flo"
+}

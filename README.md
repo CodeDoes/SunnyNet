@@ -177,6 +177,26 @@ All three run their whole forward pass in C via `--hf-arch {mamba2|deltanet|gla}
 
 **OpenAI-compatible HTTP server** (`sunnynet/serve.py`): zero-dependency (standard-library `ThreadingHTTPServer`), exposing `GET /v1/models`, `POST /v1/chat/completions` (with `stream: true`), `POST /v1/completions`, and `GET /health`. Backends are selected through an `Engine` abstraction (`HFEngine` / `GGUFEngine` / `GGUFCEngine` / `TorchEngine`); sampling is handled in the server. All four call styles of the official `openai` SDK were verified, and 400/404 handling is correct.
 
+**Subcommands and the Ollama API server**: `cli.py` adds `chat` / `serve` / `convert` / `quantize` / `info`, with `-m/--model` dispatching on suffix (`.gguf` / `.pt` / HF directory). `chat` and `serve` default to the C kernel and export the blob on first use.
+
+```bash
+sunnynet chat   -m model.gguf --system "..." --ctx 8      # interactive, streaming
+echo "Once upon a time" | sunnynet chat -m model.gguf     # piped single turn
+sunnynet serve  -m model.gguf --port 8080
+sunnynet convert <src.gguf> <dst.gguf> --arch rwkv7        # add sunnynet.* marks
+sunnynet quantize <src.gguf> <dst.gguf> --type q4_0 --ppl  # quantize + perplexity
+sunnynet info   -m model.gguf                              # arch / layers / vocab / tensors
+```
+
+`sunnynet/ollama.py` serves Ollama's **native** API (not the OpenAI shape) over
+`GET /api/version`, `GET /api/tags`, `POST /api/generate`, `POST /api/chat`, with NDJSON streaming,
+so an existing Ollama-API client only needs `OLLAMA_HOST` pointed here.
+
+Measured locally via both the official `openai` SDK 3.36.0 and raw HTTP: all four OpenAI calls and
+all five Ollama endpoints return 200, and an invalid `temperature` returns 400 instead of dropping the
+connection. GGUF to C kernel single step: numpy fp32 530.58 / C fp32 86.55 / C INT4 28.21 ms/token
+(191M test artifact, B=1). Items pending on real hardware are listed in [docs/ROADMAP.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ROADMAP.md).
+
 **Docker image** (`Dockerfile`, `python:3.11-slim`): the build stage installs gcc and compiles the kernels into a Linux `.so` (the PyPI wheel carries prebuilt libraries for win-x86_64 only, so Linux always builds from source); the runtime stage keeps `libgomp1` and no compiler. Weights are mounted at run time:
 
 ```bash
@@ -305,6 +325,7 @@ docs/
   ARCHITECTURE.md        full mathematical derivation
   EXPERIMENT_REPORT.md   measured experiment report (negative results included)
   ABI.md                 version policy / capability bits / error codes of the stable C ABI
+  ROADMAP.md             roadmap boundaries, per-item verification record, pending items
   figures/               experiment figures
 ```
 
@@ -1005,7 +1026,31 @@ sunnynet-serve --hf-dir <模型目录> --hf-arch gla --port 8080        # GLA
 | `GET /health` | 存活探针 |
 
 后端选择走 `Engine` 抽象：`HFEngine` / `GGUFEngine` / `GGUFCEngine` / `TorchEngine`，
-采样（temperature / top-k / top-p）在服务侧统一处理。
+采样（temperature / top-k / top-p / repetition-penalty）在服务侧统一处理。
+
+### 子命令与 Ollama API 服务
+
+`cli.py` 在主接口之外提供子命令；`-m/--model` 按后缀自动识别 `.gguf` / `.pt` / HF 目录：
+
+```bash
+sunnynet chat   -m model.gguf --system "..." --ctx 8      # 交互式，流式
+echo "Once upon a time" | sunnynet chat -m model.gguf     # 管道单轮
+sunnynet serve  -m model.gguf --port 8080
+sunnynet convert <src.gguf> <dst.gguf> --arch rwkv7        # 加 sunnynet.* 标记
+sunnynet quantize <src.gguf> <dst.gguf> --type q4_0 --ppl  # 量化 + 困惑度
+sunnynet info   -m model.gguf                              # 架构/层数/词表/张量数
+```
+
+`chat` / `serve` 默认走 C 内核（`--gguf-backend c`），首次调用自动导出 blob 并缓存。
+
+`sunnynet/ollama.py` 提供 Ollama **原生** API（不是 OpenAI 形状），已有用 Ollama API 的
+应用把 `OLLAMA_HOST` 指过来即可：`GET /api/version`、`GET /api/tags`、
+`POST /api/generate`、`POST /api/chat`，流式走 NDJSON。
+
+本地实测（官方 `openai` SDK 3.36.0 与裸 HTTP 双路径）：四个 OpenAI 调用与五个 Ollama
+端点全部 200；非法 `temperature` 回 400 而非断连。GGUF→C 内核单步
+numpy fp32 530.58 / C fp32 86.55 / C INT4 28.21 ms/token（191M 测试件，B=1）。
+待真机复现项见 [docs/ROADMAP.md](https://github.com/SunnyClaw-cx/SunnyNet/blob/main/docs/ROADMAP.md)。
 
 实测（本地启动后）：官方 `openai` SDK 的 `models.list`、chat 非流式、chat 流式、
 legacy completions 四种调用全部通过；400（缺字段）/ 404（未知路径）错误处理正常。
@@ -1231,6 +1276,7 @@ docs/
   ARCHITECTURE.md  完整数学推导
   EXPERIMENT_REPORT.md 实测实验报告 (含负面结论)
   ABI.md           C API 稳定 ABI 的版本策略 / 能力位 / 错误码
+  ROADMAP.md       路线边界、各项验收记录、待真机复现项
   figures/         实验图表
 ```
 

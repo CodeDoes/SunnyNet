@@ -1,0 +1,37 @@
+{
+  "version": [
+    200,
+    {
+      "version": "0.1.0"
+    }
+  ],
+  "tags": [
+    200,
+    [
+      "rwkv7-c"
+    ]
+  ],
+  "generate": [
+    200,
+    ", there was a little boy named Jack. He was a curi",
+    16,
+    true
+  ],
+  "generate_stream": [
+    200,
+    17,
+    true,
+    ", there was a little boy named Jack. He was a curi"
+  ],
+  "chat": [
+    200,
+    ", I'm a little confused about the \"I'm a little co",
+    true
+  ],
+  "chat_stream": [
+    200,
+    13,
+    true,
+    "ndi\nis a\nword\nthat\nis\n"
+  ]
+}

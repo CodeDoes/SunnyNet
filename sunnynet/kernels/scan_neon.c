@@ -19,6 +19,14 @@
 
 #define EXPORT __attribute__((visibility("default")))
 
+/* vfmaq_f32 需要 NEONv2 (AArch64, 或 32 位 ARM 的 -mfpu=neon-vfpv4)。
+ * 老 32 位 ARMv7 工具链没有它, 退回 mul+add; 数值一致, 少一次舍入。 */
+#if defined(__aarch64__) || defined(__ARM_FEATURE_FMA)
+#define SN_FMA(acc, x, y) vfmaq_f32((acc), (x), (y))
+#else
+#define SN_FMA(acc, x, y) vaddq_f32((acc), vmulq_f32((x), (y)))
+#endif
+
 EXPORT void sn_neon_set_threads(int n) {
 #ifdef _OPENMP
     omp_set_num_threads(n);
@@ -55,7 +63,7 @@ EXPORT void scan_neon_f32(const float* p, const float* nu, const float* s0,
                 float32x4_t pv = vld1q_f32(pb + off);
                 float32x4_t nv = vld1q_f32(nb + off);
                 float32x4_t g = vmulq_f32(vsubq_f32(one, pv), nv);
-                s = vfmaq_f32(g, pv, s);
+                s = SN_FMA(g, pv, s);
                 vst1q_f32(ob + off, s);
             }
             vst1q_f32(seb + d, s);
@@ -137,12 +145,58 @@ EXPORT void step_neon_f32(const float* a, const float* b, float* s,
             float32x4_t bv = vld1q_f32(bbb + d);
             if (gated) bv = vmulq_f32(vsubq_f32(one, av), bv);
             float32x4_t sv = vld1q_f32(sb + d);
-            vst1q_f32(sb + d, vfmaq_f32(bv, av, sv));
+            vst1q_f32(sb + d, SN_FMA(bv, av, sv));
         }
         for (; d < N; ++d) {
             const float av = ab[d];
             const float bv = gated ? (one[0] - av) * bbb[d] : bbb[d];
             sb[d] = av * sb[d] + bv;
+        }
+    }
+}
+
+/* 推理态单步 core: 组内成对竞争 + 门控概率 + 一步状态更新.
+ * 与 step_avx2.c 的 step_core_f32 数值等价。组内 8 通道的竞争关系需要邻元,
+ * 故整组先读进局部数组, 状态更新仍走 NEON 的 4-lane 块。
+ */
+EXPORT void step_core_neon_f32(const float* q, const float* delta,
+                               const float* s, float* s_new, float* u_out,
+                               int B, int D) {
+    const int NG = D >> 3;
+    const float32x4_t one = vdupq_n_f32(1.0f);
+    for (int b = 0; b < B; ++b) {
+        const float* qb = q + (size_t)b * 2 * D;
+        const float* sb = s + (size_t)b * D;
+        float* sbn = s_new + (size_t)b * D;
+        float* ub = u_out + (size_t)b * D;
+        for (int g = 0; g < NG; ++g) {
+            const int d0 = g << 3;
+            float e8[8], ur8[8], p8[8], u8[8];
+            for (int i = 0; i < 8; ++i) {
+                ur8[i] = qb[d0 + i];
+                e8[i] = expf(-qb[D + d0 + i]);
+            }
+            for (int i = 0; i < 8; ++i) {
+                float sig = 1.0f / (1.0f + e8[i]);
+                float s1_ = 1.0f / (1.0f + e8[i] / e8[(i + 1) & 7]);
+                float s2_ = 1.0f / (1.0f + e8[i] / e8[(i + 2) & 7]);
+                float dli = delta[d0 + i];
+                u8[i] = ur8[i] * s1_ * s2_;
+                p8[i] = dli * sig + (1.0f - dli);
+            }
+            float32x4_t pl = vld1q_f32(p8);
+            float32x4_t ul = vld1q_f32(u8);
+            float32x4_t sl = vld1q_f32(sb + d0);
+            sl = SN_FMA(vmulq_f32(vsubq_f32(one, pl), ul), pl, sl);
+            vst1q_f32(sbn + d0, sl);
+            vst1q_f32(ub + d0, ul);
+
+            float32x4_t ph = vld1q_f32(p8 + 4);
+            float32x4_t uh = vld1q_f32(u8 + 4);
+            float32x4_t sh = vld1q_f32(sb + d0 + 4);
+            sh = SN_FMA(vmulq_f32(vsubq_f32(one, ph), uh), ph, sh);
+            vst1q_f32(sbn + d0 + 4, sh);
+            vst1q_f32(ub + d0 + 4, uh);
         }
     }
 }
@@ -188,14 +242,14 @@ EXPORT void core_neon_fwd_f32(const float* q, const float* delta,
                 }
                 float32x4_t pv1 = vld1q_f32(p8);
                 float32x4_t uv1 = vld1q_f32(u8);
-                s01 = vfmaq_f32(vmulq_f32(vsubq_f32(one, pv1), uv1), pv1, s01);
+                s01 = SN_FMA(vmulq_f32(vsubq_f32(one, pv1), uv1), pv1, s01);
                 vst1q_f32(states + off, s01);
                 vst1q_f32(uo + off, uv1);
                 vst1q_f32(po + off, pv1);
 
                 float32x4_t pv2 = vld1q_f32(p8 + 4);
                 float32x4_t uv2 = vld1q_f32(u8 + 4);
-                s02 = vfmaq_f32(vmulq_f32(vsubq_f32(one, pv2), uv2), pv2, s02);
+                s02 = SN_FMA(vmulq_f32(vsubq_f32(one, pv2), uv2), pv2, s02);
                 vst1q_f32(states + off + 4, s02);
                 vst1q_f32(uo + off + 4, uv2);
                 vst1q_f32(po + off + 4, pv2);

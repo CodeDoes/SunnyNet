@@ -1,0 +1,18 @@
+{
+  "compiled_from": "sunnynet\\kernels\\scan_neon.c",
+  "shim": "experiments/_neon_shim/arm_neon.h",
+  "scan": {
+    "maxdiff_states": 0.0,
+    "maxdiff_send": 0.0
+  },
+  "core_fwd": {
+    "maxdiff_states": 5.960464477539063e-08,
+    "maxdiff_u": 1.1920928955078125e-07,
+    "maxdiff_p": 2.9802322387695312e-08
+  },
+  "step_core": {
+    "maxdiff_states": 1.1920928955078125e-07,
+    "maxdiff_u": 5.960464477539063e-08
+  },
+  "verdict": "OK"
+}

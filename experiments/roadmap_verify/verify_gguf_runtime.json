@@ -1,0 +1,27 @@
+{
+  "host": "kelin10-11",
+  "cpu": "Intel64 Family 6 Model 158 Stepping 10, GenuineIntel",
+  "python": "3.13.14",
+  "model": "experiments/gguf/rwkv7-191M-world-bf16.gguf",
+  "model_bytes": 386370240,
+  "c_fp32": {
+    "engine_build_s": 3.33,
+    "tokens": 32,
+    "total_s": 2.7697,
+    "ms_per_token": 86.55
+  },
+  "c_int4": {
+    "engine_build_s": 3.52,
+    "tokens": 64,
+    "total_s": 1.8057,
+    "ms_per_token": 28.21
+  },
+  "numpy_fp32": {
+    "engine_build_s": 2.83,
+    "tokens": 8,
+    "total_s": 4.2446,
+    "ms_per_token": 530.58
+  },
+  "int4_over_fp32": 3.07,
+  "int4_over_numpy": 18.81
+}

@@ -145,12 +145,14 @@ def _main_gguf_c(args) -> int:
     from .runtime.rwkv7 import RWKV7
     from .runtime.rwkv7_c import SnRWKV7
 
-    blob = Path(args.blob) if args.blob else Path(args.gguf).with_suffix(
-        ".q4.bin" if args.quant == "int4" else ".runtime.bin")
-    if not blob.exists():
-        raise SystemExit(f"缺少权重 blob: {blob}\n先运行: python -X utf8 "
-                         f"experiments/_export_rwkv7.py {args.gguf} {blob}"
-                         + ("" if args.quant == "fp32" else " (INT4 需不带 --f32)"))
+    # 未显式给 blob 时按需导出并缓存: 首次会花一次反量化的时间, 之后直接命中.
+    if args.blob:
+        blob = Path(args.blob)
+        if not blob.exists():
+            raise SystemExit(f"缺少权重 blob: {blob}")
+    else:
+        from .runtime.blob import ensure_rwkv7_blob
+        blob = ensure_rwkv7_blob(args.gguf, quant=args.quant)
     t0 = time.perf_counter()
     tk = RWKV7(args.gguf)
     m = SnRWKV7(blob, tk.vocab)
@@ -432,17 +434,177 @@ def _sample_np(logits, temperature: float, top_k: int) -> int:
     return int(np.random.default_rng().choice(z.size, p=p))
 
 
-def main(argv=None):
-    ap = argparse.ArgumentParser(prog="sunnynet-cli",
-                                 description="SunnyNet CPU 推理")
+def _main_sub(sub: str, argv: list) -> int:
+    if sub == "chat":
+        return _cmd_chat(argv)
+    if sub == "serve":
+        return _cmd_serve(argv)
+    if sub == "convert":
+        return _cmd_convert(argv)
+    if sub == "quantize":
+        return _cmd_quantize(argv)
+    if sub == "info":
+        return _cmd_info(argv)
+    raise SystemExit(f"未知子命令 {sub!r}")
+
+
+def _cmd_chat(argv) -> int:
+    """交互式聊天; 管道输入或 --prompt 时退化为单轮."""
+    ap = argparse.ArgumentParser(prog="sunnynet chat",
+                                 description="交互式聊天 (流式输出)")
+    _add_infer_args(ap, gguf_backend_default="c")
+    ap.add_argument("--system", default=None, help="system prompt")
+    ap.add_argument("--ctx", type=int, default=8,
+                    help="保留的历史轮数 (每轮含 user+assistant)")
+    args = ap.parse_args(argv)
+    _resolve_model_flags(args)
+    if not (args.gguf or args.ckpt or args.hf_dir):
+        raise SystemExit("需要 -m/--model 或 --gguf/--ckpt/--hf-dir")
+
+    from .serve import build_engine, generate_stream, _messages_to_prompt
+    eng = build_engine(args)
+
+    def one_round(messages):
+        prompt = _messages_to_prompt(messages)
+        ids = eng.encode(prompt)
+        pieces = []
+        for _tid, piece in generate_stream(eng, ids, args.max_new,
+                                           args.temperature, args.top_p,
+                                           args.top_k, args.seed, [],
+                                           args.repetition_penalty):
+            pieces.append(piece)
+            sys.stdout.write(piece)
+            sys.stdout.flush()
+        return "".join(pieces)
+
+    history: list = []
+    if args.system:
+        history.append({"role": "system", "content": args.system})
+
+    # 一次性模式: --prompt 或 stdin 非 tty
+    if args.prompt:
+        print(one_round(history + [{"role": "user", "content": args.prompt}]))
+        return 0
+    if not sys.stdin.isatty():
+        text = sys.stdin.read().strip()
+        if text:
+            print(one_round(history + [{"role": "user", "content": text}]))
+            return 0
+        return 0
+
+    print("SunnyNet chat; 空行退出, /reset 清空上下文")
+    while True:
+        try:
+            line = input(">>> ")
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        line = line.strip()
+        if not line:
+            break
+        if line == "/reset":
+            history = [h for h in history if h["role"] == "system"]
+            print("[context cleared]")
+            continue
+        history.append({"role": "user", "content": line})
+        reply = one_round(history)
+        print()
+        history.append({"role": "assistant", "content": reply})
+        if args.ctx > 0:
+            sys_msgs = [h for h in history if h["role"] == "system"]
+            rest = [h for h in history if h["role"] != "system"]
+            history = sys_msgs + rest[-2 * args.ctx:]
+    return 0
+
+
+def _cmd_serve(argv) -> int:
+    ap = argparse.ArgumentParser(prog="sunnynet serve",
+                                 description="OpenAI 兼容 HTTP 服务")
+    _add_infer_args(ap, gguf_backend_default="c")
+    ap.add_argument("--host", default="127.0.0.1")
+    ap.add_argument("--port", type=int, default=8080)
+    ap.add_argument("--model-name", default=None,
+                    help="对外暴露的模型名 (默认按权重名)")
+    args = ap.parse_args(argv)
+    _resolve_model_flags(args)
+    if not (args.gguf or args.ckpt or args.hf_dir):
+        raise SystemExit("需要 -m/--model 或 --gguf/--ckpt/--hf-dir")
+    from .serve import build_engine, serve
+    eng = build_engine(args)
+    if args.model_name:
+        eng.name = args.model_name
+    print(f"[sunnynet] 模型 {eng.name} vocab={eng.vocab}", flush=True)
+    httpd = serve(eng, args.host, args.port)
+    print(f"[sunnynet] 监听 http://{args.host}:{args.port}", flush=True)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        httpd.server_close()
+    return 0
+
+
+def _cmd_convert(argv) -> int:
+    """把 GGUF 权重转成 SunnyNet 优化过的 GGUF (加自定义标记 + 预量化)."""
+    from .runtime.convert import convert_main
+    return convert_main(argv)
+
+
+def _cmd_quantize(argv) -> int:
+    """GGUF -> GGUF 量化 (Q4_K_M / Q5_K_M / Q8_0 ...), 附困惑度评测."""
+    from .runtime.quantize import quantize_main
+    return quantize_main(argv)
+
+
+def _cmd_info(argv) -> int:
+    """打印权重信息; 对 GGUF 显示架构/层数/词表/张量数."""
+    ap = argparse.ArgumentParser(prog="sunnynet info")
+    ap.add_argument("-m", "--model", required=True)
+    ap.add_argument("--json", action="store_true")
+    args = ap.parse_args(argv)
+    p = Path(args.model)
+    info: dict = {"file": str(p), "bytes": p.stat().st_size,
+                  "mb": round(p.stat().st_size / 2**20, 1)}
+    if p.suffix == ".gguf":
+        from .runtime.gguf import GGUFModel
+        g = GGUFModel(p)
+        arch = g.meta.get("general.architecture") or g.meta.get("architecture")
+        info.update({
+            "format": "gguf",
+            "architecture": arch,
+            "tensors": len(g.names()),
+            "vocab": len(g.tokens()),
+            "block_count": g.get_int("rwkv7.block_count", 0),
+            "embedding_length": g.get_int("rwkv7.embedding_length", 0),
+        })
+        ftype = g.meta.get("general.file_type")
+        if ftype is not None:
+            info["file_type"] = ftype
+    else:
+        info["format"] = p.suffix.lstrip(".") or "unknown"
+    if args.json:
+        print(json.dumps(info, ensure_ascii=False, indent=2))
+    else:
+        for k, v in info.items():
+            print(f"{k:18s} {v}")
+    return 0
+
+
+def _add_infer_args(ap, *, gguf_backend_default: str = "numpy"):
+    """推理相关参数, chat / serve / 顶层旧接口共用."""
+    ap.add_argument("-m", "--model", default=None,
+                    help="权重路径: .gguf / .pt / HF 目录, 按后缀自动识别")
     ap.add_argument("--ckpt", default=None, help="SunnyNet checkpoint 路径")
     ap.add_argument("--gguf", default=None,
-                    help="外部 GGUF 权重路径 (目前支持 RWKV-7), 与 --ckpt 二选一")
+                    help="外部 GGUF 权重路径 (支持 RWKV-7), 与 --ckpt 二选一")
     ap.add_argument("--prompt", default="", help="提示词")
     ap.add_argument("--max-new", type=int, default=80)
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--top-k", type=int, default=40)
     ap.add_argument("--top-p", type=float, default=0.95)
+    ap.add_argument("--repetition-penalty", type=float, default=1.0,
+                    help="对已出现 token 的 logits 惩罚 (>1 抑制重复)")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--tokenizer", default=str(TOKENIZER))
     ap.add_argument("--tokenizer-dir", default=None,
@@ -450,7 +612,8 @@ def main(argv=None):
     ap.add_argument("--threads", type=int, default=0, help="0 = 不限制")
     ap.add_argument("--backend", choices=["torch", "c"], default="torch",
                     help="c = 纯 C 整模型单步 (需先导出 .runtime.bin)")
-    ap.add_argument("--gguf-backend", choices=["numpy", "c"], default="numpy",
+    ap.add_argument("--gguf-backend", choices=["numpy", "c"],
+                    default=gguf_backend_default,
                     help="--gguf 时的执行后端; c = C 内核整模型单步")
     ap.add_argument("--blob", default=None,
                     help="C 内核权重 blob: RWKV-7 的 --gguf-backend c 用它, "
@@ -458,19 +621,50 @@ def main(argv=None):
                          "(整模型前向在 C); 单独给出时按 RWKV-7 blob 直接推理")
     ap.add_argument("--vocab", type=int, default=0,
                     help="单独用 --blob 时的词表大小 (默认 65536)")
-    ap.add_argument("--quant", choices=["fp32", "int4"], default="fp32",
+    ap.add_argument("--quant", choices=["fp32", "int4"], default="int4",
                     help="--gguf-backend c 的权重精度; int4 需对应的 .q4.bin")
     ap.add_argument("--half", action="store_true",
                     help="--backend c 时把 GEMV 权重与 head 载入为 fp16; "
                          "读字节减半, 单步约快 1.3x, logits 相对偏差约 7e-4")
     ap.add_argument("--hf-dir", default=None,
-                    help="HF 权重目录 (Mamba-2 / DeltaNet / GLA), 与 --ckpt/--gguf 三选一")
+                    help="HF 权重目录 (Mamba-2 / DeltaNet / GLA / HGRN2), 与 --ckpt/--gguf 三选一")
     ap.add_argument("--hf-arch", choices=["mamba2", "deltanet", "gla", "hgrn2"],
                     default="mamba2",
                     help="--hf-dir 的架构")
     ap.add_argument("--stats", action="store_true", help="输出解码耗时统计")
     ap.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+
+
+def _resolve_model_flags(args) -> None:
+    """把 -m/--model 映射到对应的既有 flag, 按后缀识别 .gguf / .pt / HF 目录."""
+    m = getattr(args, "model", None)
+    if not m:
+        return
+    if args.gguf or args.ckpt or args.hf_dir:
+        return
+    p = Path(m)
+    if p.suffix == ".gguf" or p.name.endswith(".gguf"):
+        args.gguf = m
+    elif p.suffix == ".pt":
+        args.ckpt = m
+    elif p.is_dir():
+        args.hf_dir = m
+    else:
+        args.gguf = m
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    # 无子命令时保持旧行为 (顶层 flag 直接推理)
+    subcmds = {"chat", "serve", "convert", "quantize", "info"}
+    if argv and argv[0] in subcmds:
+        return _main_sub(argv[0], argv[1:])
+
+    ap = argparse.ArgumentParser(prog="sunnynet-cli",
+                                 description="SunnyNet CPU 推理")
+    _add_infer_args(ap)
     args = ap.parse_args(argv)
+    _resolve_model_flags(args)
 
     if args.hf_dir:
         return _main_hf(args)
@@ -481,7 +675,7 @@ def main(argv=None):
     if args.blob and not args.ckpt:
         return _main_rwkv7_blob(args)
     if not args.ckpt:
-        raise SystemExit("需要 --ckpt / --gguf / --hf-dir / --blob 之一")
+        raise SystemExit("需要 --ckpt / --gguf / --hf-dir / --blob / -m 之一")
 
     if args.threads > 0:
         torch.set_num_threads(args.threads)

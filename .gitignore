@@ -54,6 +54,12 @@ docs/DISCUSSIONS_*.md
 sunnynet/kernels/_build/
 sunnynet/runtime/_build/
 
+# 标量 shim 的编译产物 (由 _run.py 自行重建)
+experiments/_avx512_shim/*.dll
+experiments/_neon_shim/*.dll
+experiments/_avx512_shim/*.so
+experiments/_neon_shim/*.so
+
 # 预编译库 (wheel 构建期生成, 不入库)
 sunnynet/_prebuilt/
 
